@@ -1,0 +1,16 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &9876543210
+GameObject:
+  m_Name: MainCamera
+  m_Component:
+  - component: {fileID: 9876543211}
+  - component: {fileID: 9876543212}
+--- !u!4 &9876543211
+Transform:
+  m_GameObject: {fileID: 9876543210}
+--- !u!114 &9876543212
+MonoBehaviour:
+  m_GameObject: {fileID: 9876543210}
+  m_Script: {fileID: 0}
+  m_Name: MissingScriptOnCamera

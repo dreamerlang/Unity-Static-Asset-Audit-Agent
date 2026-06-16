@@ -1,0 +1,49 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &1234567890
+GameObject:
+  m_ObjectHideFlags: 0
+  m_PrefabAsset: {fileID: 0}
+  m_Name: MainPanel
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1234567891}
+  - component: {fileID: 1234567892}
+  - component: {fileID: 1234567893}
+--- !u!224 &1234567891
+RectTransform:
+  m_GameObject: {fileID: 1234567890}
+--- !u!114 &1234567892
+MonoBehaviour:
+  m_GameObject: {fileID: 1234567890}
+  m_Script: {fileID: 11500000, guid: aabbccddeeff00112233445566778899, type: 3}
+  m_Name: UIManager
+--- !u!114 &1234567893
+MonoBehaviour:
+  m_GameObject: {fileID: 1234567890}
+  m_Script: {fileID: 0}
+  m_Name: MissingComponent
+--- !u!1 &1234567894
+GameObject:
+  m_ObjectHideFlags: 0
+  m_Name: Canvas
+  m_Component:
+  - component: {fileID: 1234567895}
+  - component: {fileID: 1234567896}
+  - component: {fileID: 1234567897}
+--- !u!223 &1234567895
+Canvas:
+  m_GameObject: {fileID: 1234567894}
+--- !u!114 &1234567896
+MonoBehaviour:
+  m_GameObject: {fileID: 1234567894}
+  m_Script: {fileID: -765806418, guid: , type: 3}
+  m_Name: GraphicRaycaster
+  GraphicRaycaster:
+    m_BlockingObjects: 0
+--- !u!114 &1234567897
+MonoBehaviour:
+  m_GameObject: {fileID: 1234567894}
+  m_Script: {fileID: -765806418, guid: xyz, type: 3}
+  m_Name: GraphicRaycaster
+  AnotherGraphicRaycaster: yes
