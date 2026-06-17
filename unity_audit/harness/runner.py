@@ -7,9 +7,14 @@ Implements the step-by-step loop:
 Constraints:
 - max_steps (default 12)
 - One tool per step
-- No parallel tool calls
+- No parallel tool calls (within a single agent)
 - Max 1 retry for same tool+params failure
 - Fallback to deterministic on any failure
+
+Multi-Agent (v0.1):
+- When max_workers > 1, uses GroupCoordinator + ThreadPoolExecutor to
+  process issue groups in parallel.
+- Each worker gets its own AuditAgent (via agent_factory) for thread safety.
 """
 
 import uuid
@@ -34,15 +39,22 @@ class HarnessRunner:
 
     If anything goes wrong (model failure, policy violation, step limit,
     timeout), the harness falls back to the deterministic FixPlanner results.
+
+    Multi-Agent support:
+    - max_workers=1 (default): Sequential processing, backward compatible.
+    - max_workers>1: Parallel processing via GroupCoordinator + ThreadPoolExecutor.
+      Requires agent_factory to create per-worker AuditAgent instances.
     """
 
     def __init__(
         self,
-        agent,  # AuditAgent instance
+        agent,  # AuditAgent instance (used for sequential mode)
         audit_result,  # AuditResult from deterministic scan
         max_steps: int = 12,
         trace_enabled: bool = True,
         tool_registry: ToolRegistry | None = None,
+        max_workers: int = 1,
+        agent_factory=None,  # Callable[[], AuditAgent] for parallel mode
     ):
         self.agent = agent
         self.audit_result = audit_result
@@ -50,6 +62,8 @@ class HarnessRunner:
         self.trace_enabled = trace_enabled
         self.tool_registry = tool_registry or self._build_default_tool_registry()
         self.trace_writer: TraceWriter | None = None
+        self.max_workers = max_workers
+        self.agent_factory = agent_factory
 
         # Track tool retries: {(issue_id, tool_name, arguments_hash) -> count}
         self._retry_counts: dict[tuple[str, str, int], int] = {}
@@ -128,76 +142,95 @@ class HarnessRunner:
             state.pending_issue_ids = []
 
             # Phase 2: Process one representative per group, broadcast assessment.
-            # Auto-scale max_steps: each group needs ~4 steps (3 info + 1 submit).
+            # Auto-scale max_steps: each group needs ~5 steps.
             group_count = len(pending_by_key)
             effective_max = max(state.max_steps, group_count * 5)
             if effective_max > state.max_steps:
                 state.max_steps = effective_max
-            processed_count = 0
-            for (_rule_id, _severity, _path_category), issue_ids in pending_by_key.items():
-                if state.step_count >= state.max_steps:
-                    state.status = RunStatus.COMPLETED_WITH_FALLBACK.value
-                    break
 
+            # Build groups list
+            groups: list[tuple] = []
+            for group_key, issue_ids in pending_by_key.items():
                 representative_id = issue_ids[0]
-                peers = issue_ids[1:]  # Will receive cloned assessment
-
-                # Process the representative through the agent
+                peers = list(issue_ids[1:])
                 rep_data = self._get_issue_data(representative_id, audit_result)
                 if rep_data is None:
                     state.complete_issue(representative_id)
                     for pid in peers:
                         state.complete_issue(pid)
                     continue
+                groups.append((group_key, rep_data, peers))
 
-                assessment = None
-                try:
-                    assessment = self._process_representative(
-                        state, rep_data, audit_result)
-                except Exception as e:
-                    state.add_error(f"Error processing {representative_id}: {e}")
-                    if self.trace_writer:
-                        self.trace_writer.fallback_used(str(e))
+            # Choose execution path: parallel or sequential
+            if self.max_workers > 1 and self.agent_factory is not None:
+                # ── Parallel path via GroupCoordinator ──
+                from unity_audit.harness.coordinator import GroupCoordinator
 
-                # Broadcast assessment to all peers
-                if assessment is not None:
-                    # Representative gets the original assessment
-                    state.add_assessment(assessment)
-                    state.complete_issue(representative_id)
+                coordinator = GroupCoordinator(
+                    agent_factory=self.agent_factory,
+                    tool_registry=self.tool_registry,
+                    audit_result=audit_result,
+                    max_workers=self.max_workers,
+                    max_steps_per_group=effective_max,
+                    trace_enabled=self.trace_enabled,
+                )
+                state = coordinator.dispatch(
+                    groups=groups,
+                    master_state=state,
+                    trace_writer=self.trace_writer,
+                )
+            else:
+                # ── Sequential path (backward compatible) ──
+                for group_key, rep_data, peers in groups:
+                    if state.step_count >= state.max_steps:
+                        state.status = RunStatus.COMPLETED_WITH_FALLBACK.value
+                        break
 
-                    # Clone for peers — same group, same decision, but summary
-                    # must reference the correct asset path, not the representative's.
-                    for peer_id in peers:
-                        peer_data = self._get_issue_data(peer_id, audit_result)
-                        peer_asset = peer_data["asset_path"] if peer_data else peer_id
-                        peer_summary = (
-                            f"[同组评估，基于 {representative_id} 的分析] "
-                            f"{peer_asset}: {assessment.summary[:180]}"
-                        )
-                        peer_assessment = AgentAssessment(
-                            issue_id=peer_id,
-                            risk_level=assessment.risk_level,
-                            recommended_action=assessment.recommended_action,
-                            confidence=assessment.confidence,
-                            summary=peer_summary,
-                            evidence_refs=list(assessment.evidence_refs),
-                            needs_human_review=assessment.needs_human_review,
-                        )
-                        state.add_assessment(peer_assessment)
-                        state.complete_issue(peer_id)
+                    representative_id = rep_data["issue_id"]
 
-                    if self.trace_writer:
-                        self.trace_writer.model_responded(
-                            state.step_count, representative_id,
-                            "broadcast", tool_name=None,
-                        )
-                else:
-                    # Representative failed — mark all as fallback
-                    state.complete_issue(representative_id)
-                    for peer_id in peers:
-                        state.complete_issue(peer_id)
+                    assessment = None
+                    try:
+                        assessment = self._process_representative(
+                            state, rep_data, audit_result)
+                    except Exception as e:
+                        state.add_error(f"Error processing {representative_id}: {e}")
+                        if self.trace_writer:
+                            self.trace_writer.fallback_used(str(e))
 
-                processed_count += 1
+                    # Broadcast assessment to all peers
+                    if assessment is not None:
+                        state.add_assessment(assessment)
+                        state.complete_issue(representative_id)
+
+                        for peer_id in peers:
+                            peer_data = self._get_issue_data(peer_id, audit_result)
+                            peer_asset = peer_data["asset_path"] if peer_data else peer_id
+                            peer_summary = (
+                                f"[同组评估，基于 {representative_id} 的分析] "
+                                f"{peer_asset}: {assessment.summary[:180]}"
+                            )
+                            peer_assessment = AgentAssessment(
+                                issue_id=peer_id,
+                                risk_level=assessment.risk_level,
+                                recommended_action=assessment.recommended_action,
+                                confidence=assessment.confidence,
+                                summary=peer_summary,
+                                evidence_refs=list(assessment.evidence_refs),
+                                needs_human_review=assessment.needs_human_review,
+                            )
+                            state.add_assessment(peer_assessment)
+                            state.complete_issue(peer_id)
+
+                        if self.trace_writer:
+                            self.trace_writer.model_responded(
+                                state.step_count, representative_id,
+                                "broadcast", tool_name=None,
+                            )
+                    else:
+                        # Representative failed — mark all as fallback
+                        state.complete_issue(representative_id)
+                        for peer_id in peers:
+                            state.complete_issue(peer_id)
 
             # Check if all issues were processed
             if not pending_by_key:
@@ -317,6 +350,7 @@ class HarnessRunner:
                     tool_results=state.tool_results,
                     step=step,
                     max_steps=self.max_steps,
+                    rule_id=issue_data.get("rule_id"),
                 )
             except Exception as e:
                 if self.trace_writer:

@@ -107,6 +107,26 @@ class RunState:
     def touch(self):
         self.updated_at = time.time()
 
+    def merge(self, other: "RunState"):
+        """Merge another RunState into this one (thread-safe with external lock).
+
+        Combines tool_results, agent_assessments, errors, and
+        completed_issue_ids. The caller is responsible for holding a lock
+        if called from multiple threads.
+
+        Args:
+            other: Another RunState to merge into this one. Its lists are
+                   appended to this state's lists.
+        """
+        self.tool_results.extend(other.tool_results)
+        self.agent_assessments.extend(other.agent_assessments)
+        self.errors.extend(other.errors)
+        for iid in other.completed_issue_ids:
+            if iid not in self.completed_issue_ids:
+                self.completed_issue_ids.append(iid)
+        self.step_count += other.step_count
+        self.touch()
+
     def to_dict(self) -> dict:
         return {
             "run_id": self.run_id,

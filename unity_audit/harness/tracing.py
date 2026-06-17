@@ -132,6 +132,25 @@ class TraceWriter:
         """Record fallback_used event."""
         self.add("fallback_used", step=0, payload={"reason": reason})
 
+    def worker_started(self, worker_id: int, group_key: str):
+        """Record worker_started event (parallel mode)."""
+        self.add("worker_started", step=0, payload={
+            "worker_id": worker_id,
+            "group_key": group_key,
+        })
+
+    def worker_completed(self, worker_id: int, group_key: str,
+                         assessments: int = 0, tool_calls: int = 0,
+                         success: bool = True):
+        """Record worker_completed event (parallel mode)."""
+        self.add("worker_completed", step=0, payload={
+            "worker_id": worker_id,
+            "group_key": group_key,
+            "assessments_produced": assessments,
+            "tool_calls": tool_calls,
+            "success": success,
+        })
+
     def run_completed(self, step: int, status: str,
                       assessments_count: int = 0,
                       tool_calls: int = 0):

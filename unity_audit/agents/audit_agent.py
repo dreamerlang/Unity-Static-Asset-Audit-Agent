@@ -39,6 +39,7 @@ class AuditAgent:
         tool_results: list[ToolCallRecord],
         step: int = 0,
         max_steps: int = 12,
+        rule_id: str | None = None,
     ) -> dict:
         """Get the next action from the model.
 
@@ -48,6 +49,7 @@ class AuditAgent:
             tool_results: Tool results from this run so far.
             step: Current step number.
             max_steps: Maximum steps allowed.
+            rule_id: Optional rule ID for specialized prompt routing.
 
         Returns:
             Parsed action dict (call_tool or finish).
@@ -67,12 +69,16 @@ class AuditAgent:
                            f"{json.dumps(tr.result, ensure_ascii=False)[:300]}")
             tool_results_context = "\n".join(lines)
 
+        # Use rule_id from issue_data if not explicitly provided
+        effective_rule_id = rule_id or issue_data.get("rule_id")
+
         system_prompt = build_system_prompt(
             issue_context=issue_context,
             tool_descriptions=tool_descriptions,
             tool_results_context=tool_results_context,
             step=step,
             max_steps=max_steps,
+            rule_id=effective_rule_id,
         )
 
         # Format tools for model

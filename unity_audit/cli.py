@@ -211,6 +211,7 @@ def _run_agent_mode(
     ci_format: str | None = None,
     incremental: bool = False,
     base_ref: str | None = None,
+    max_workers: int = 1,
 ) -> tuple[int, AuditRequest, object, bool]:
     """Run the Agent-enhanced audit mode.
 
@@ -321,11 +322,22 @@ def _run_agent_mode(
 
                 agent = AuditAgent(model_client=model_client)
 
+                # Build agent_factory for parallel mode (creates per-worker agents)
+                def _agent_factory():
+                    mc = create_model_client(
+                        model_name,
+                        api_key=None,
+                        timeout=timeout,
+                    )
+                    return AuditAgent(model_client=mc)
+
                 runner = HarnessRunner(
                     agent=agent,
                     audit_result=result,
                     max_steps=max_steps,
                     trace_enabled=trace_enabled,
+                    max_workers=max_workers,
+                    agent_factory=_agent_factory if max_workers > 1 else None,
                 )
 
                 # Build initial state
@@ -515,6 +527,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         cli_agent=args.agent,
         cli_model=getattr(args, "model", None),
         cli_max_steps=getattr(args, "max_agent_steps", None),
+        cli_max_workers=getattr(args, "max_workers", None),
     )
 
     platform = config.platform or args.platform or "Unknown"
@@ -529,6 +542,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     base_ref = getattr(args, "base", None)
     if args.agent:
         trace_enabled = not getattr(args, "no_trace", False)
+        max_workers = config.agent.get("max_workers", 5)
         exit_code, request, result, agent_used = _run_agent_mode(
             project_root=project_root,
             output_dir=output_dir,
@@ -539,6 +553,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             ci_format=ci_format,
             incremental=incremental,
             base_ref=base_ref,
+            max_workers=max_workers,
         )
     else:
         exit_code, request, result = _run_deterministic_scan(
@@ -626,6 +641,12 @@ def _build_scan_parser(subparsers):
         action="store_true",
         default=False,
         help="Disable trace.jsonl output",
+    )
+    scan_parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Number of parallel agent workers (default: 5 if agent enabled, 1 = sequential)",
     )
     scan_parser.add_argument(
         "--ci",

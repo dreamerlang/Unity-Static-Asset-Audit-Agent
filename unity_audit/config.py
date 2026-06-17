@@ -28,13 +28,14 @@ DEFAULT_CONFIG = {
         "max_steps": 12,
         "timeout_seconds": 60,
         "trace_enabled": True,
+        "max_workers": 5,
     },
 }
 
 # Known config keys for validation
 KNOWN_TOP_KEYS = {"version", "platform", "rules", "agent"}
 KNOWN_RULE_IDS = set(DEFAULT_CONFIG["rules"].keys())
-KNOWN_AGENT_KEYS = {"enabled", "max_steps", "timeout_seconds", "trace_enabled", "model"}
+KNOWN_AGENT_KEYS = {"enabled", "max_steps", "timeout_seconds", "trace_enabled", "model", "max_workers"}
 
 
 @dataclass
@@ -142,6 +143,7 @@ def merge_cli_with_config(
     cli_agent: bool = False,
     cli_model: str | None = None,
     cli_max_steps: int | None = None,
+    cli_max_workers: int | None = None,
 ) -> AuditConfig:
     """Merge CLI arguments into config, with CLI taking precedence.
 
@@ -151,6 +153,7 @@ def merge_cli_with_config(
         cli_agent: --agent flag from CLI.
         cli_model: --model from CLI.
         cli_max_steps: --max-agent-steps from CLI.
+        cli_max_workers: --max-workers from CLI.
 
     Returns:
         Updated AuditConfig (mutates in place, but also returns for convenience).
@@ -166,5 +169,8 @@ def merge_cli_with_config(
 
     if cli_max_steps is not None:
         config.agent["max_steps"] = cli_max_steps
+
+    if cli_max_workers is not None:
+        config.agent["max_workers"] = cli_max_workers
 
     return config

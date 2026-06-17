@@ -118,9 +118,30 @@ def build_system_prompt(
     tool_results_context: str,
     step: int,
     max_steps: int,
+    rule_id: str | None = None,
 ) -> str:
-    """Build the system prompt with current context."""
-    return SYSTEM_PROMPT.format(
+    """Build the system prompt with current context.
+
+    Args:
+        issue_context: JSON-serialized issue data.
+        tool_descriptions: Human-readable tool descriptions.
+        tool_results_context: Summary of tool results so far.
+        step: Current step number.
+        max_steps: Maximum allowed steps.
+        rule_id: Optional rule_id for specialized prompt routing.
+                 If provided, uses the domain-specific prompt for that rule.
+                 If None or unmatched, uses the default SYSTEM_PROMPT.
+    """
+    # Select specialized prompt if available
+    from unity_audit.agents.specialized_prompts import get_prompt_for_rule
+
+    prompt = SYSTEM_PROMPT
+    if rule_id:
+        specialized = get_prompt_for_rule(rule_id)
+        if specialized is not None:
+            prompt = specialized
+
+    return prompt.format(
         step=step,
         max_steps=max_steps,
         issue_context=issue_context,
