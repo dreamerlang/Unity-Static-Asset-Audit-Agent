@@ -64,9 +64,16 @@ class AuditAgent:
         tool_results_context = "No tools called yet."
         if tool_results:
             lines = ["Previous tool results:"]
+            context_chars = 0
             for tr in tool_results:
-                lines.append(f"- [{tr.tool_result_id}] {tr.tool_name}: "
-                           f"{json.dumps(tr.result, ensure_ascii=False)[:300]}")
+                serialized = json.dumps(tr.result, ensure_ascii=False)
+                serialized = serialized[:6000]
+                entry = f"- [{tr.tool_result_id}] {tr.tool_name}: {serialized}"
+                if context_chars + len(entry) > 16000:
+                    lines.append("- Additional tool results omitted by context budget.")
+                    break
+                lines.append(entry)
+                context_chars += len(entry)
             tool_results_context = "\n".join(lines)
 
         # Use rule_id from issue_data if not explicitly provided

@@ -9,7 +9,8 @@ import uuid
 from dataclasses import dataclass, field
 
 from unity_audit.application.models import AuditResult
-from unity_audit.harness.policy import validate_action
+from unity_audit.harness.assessment_guardrails import validate_assessment_guardrails
+from unity_audit.harness.policy import validate_action, validate_assessment_payload
 from unity_audit.harness.state import (
     AgentAssessment,
     RunState,
@@ -329,7 +330,7 @@ class GroupWorker:
             # Execute tool or finish
             if action_type == "finish":
                 assessment_dict = action["assessment"]
-                return AgentAssessment(
+                assessment = AgentAssessment(
                     issue_id=assessment_dict["issue_id"],
                     risk_level=assessment_dict["risk_level"],
                     recommended_action=assessment_dict["recommended_action"],
@@ -337,7 +338,22 @@ class GroupWorker:
                     summary=assessment_dict["summary"],
                     evidence_refs=assessment_dict.get("evidence_refs", []),
                     needs_human_review=assessment_dict.get("needs_human_review", False),
-                ), local_tool_results, step_count
+                    usage_context=assessment_dict.get("usage_context", "unknown"),
+                    evidence_strength=assessment_dict.get("evidence_strength", "none"),
+                    fix_plan=assessment_dict.get("fix_plan"),
+                )
+                valid_assessment, assessment_error = validate_assessment_guardrails(
+                    issue_data,
+                    assessment,
+                    local_tool_results[results_before:],
+                )
+                if not valid_assessment:
+                    if trace_writer and self.trace_enabled:
+                        trace_writer.guardrail_triggered(
+                            step_count, issue_id, f"Assessment: {assessment_error}"
+                        )
+                    return None, local_tool_results, step_count
+                return assessment, local_tool_results, step_count
 
             elif action_type == "call_tool":
                 tool_name = action["tool_name"]
@@ -384,7 +400,7 @@ class GroupWorker:
                             step_count, issue_id, tool_name,
                             tool_result.tool_result_id, True,
                         )
-                    return AgentAssessment(
+                    assessment = AgentAssessment(
                         issue_id=arguments.get("issue_id", issue_id),
                         risk_level=arguments.get("risk_level", "medium"),
                         recommended_action=arguments.get("recommended_action", "manual_confirm_required"),
@@ -392,7 +408,29 @@ class GroupWorker:
                         summary=arguments.get("summary", ""),
                         evidence_refs=arguments.get("evidence_refs", []),
                         needs_human_review=arguments.get("needs_human_review", False),
-                    ), local_tool_results, step_count
+                        usage_context=arguments.get("usage_context", "unknown"),
+                        evidence_strength=arguments.get("evidence_strength", "none"),
+                        fix_plan=arguments.get("fix_plan"),
+                    )
+                    valid_payload, _ = validate_assessment_payload(
+                        arguments,
+                        existing_result_ids - {tool_result.tool_result_id},
+                        original_issue=issue_data,
+                    )
+                    if not valid_payload:
+                        return None, local_tool_results, step_count
+                    valid_assessment, assessment_error = validate_assessment_guardrails(
+                        issue_data,
+                        assessment,
+                        local_tool_results[results_before:],
+                    )
+                    if not valid_assessment:
+                        if trace_writer and self.trace_enabled:
+                            trace_writer.guardrail_triggered(
+                                step_count, issue_id, f"Assessment: {assessment_error}"
+                            )
+                        return None, local_tool_results, step_count
+                    return assessment, local_tool_results, step_count
 
                 if tool_result.ok:
                     if trace_writer and self.trace_enabled:

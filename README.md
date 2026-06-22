@@ -46,8 +46,26 @@ Additional outputs:
 - `run.json` — full run state (checkpoint)
 - `trace.jsonl` — structured event trace
 - `agent_assessments.json` — agent assessments per issue
+- `agent_fix_plans.json` — structured, approval-required candidate fix plans
 
 Without an API key, agent mode falls back to deterministic results automatically.
+
+### Record Human Feedback
+
+Store a reviewed decision in the Unity project so future Agent runs can use it
+as project-specific context:
+
+```bash
+python -m unity_audit.cli feedback /path/to/UnityProject \
+  --rule-id TEX_READ_WRITE_ENABLED \
+  --asset-pattern 'Textures/Runtime/**' \
+  --decision rejected_fix \
+  --reason 'Runtime-generated textures are read by gameplay code'
+```
+
+Feedback is appended to `.unity-audit/feedback.jsonl` inside the Unity project.
+It is advisory only and cannot override direct code evidence or deterministic
+guardrails.
 
 ### Testing
 
@@ -129,6 +147,10 @@ Agent Harness:
   Tools (read-only) → Policy (guardrails) → State/Trace → Runner
   ModelClient (fake or real) → AuditAgent → Structured Assessment
 ```
+
+Agent assessments may include structured usage context, evidence strength, and
+candidate fix plans. Fix plans never execute directly and must declare
+`requires_approval: true`.
 
 Key principles:
 - **Deterministic rules are the source of truth** — LLM cannot add, remove, or

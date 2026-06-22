@@ -467,6 +467,7 @@ class TestGroupCoordinator:
 
         # Use a counter to give different assessments per group
         counter = {"value": 0}
+        issue_ids = ["TEX_RW_0", "AUD_LONG_0"]
 
         def agent_factory():
             idx = counter["value"]
@@ -475,7 +476,7 @@ class TestGroupCoordinator:
                 {
                     "action": "finish",
                     "assessment": {
-                        "issue_id": f"ISSUE_{idx}",
+                        "issue_id": issue_ids[idx],
                         "risk_level": "low",
                         "recommended_action": "auto_fix_candidate",
                         "confidence": 0.8 + idx * 0.05,
@@ -613,9 +614,54 @@ class TestGroupCoordinator:
 
         # One group should have an assessment (the successful one)
         assert len(final_state.agent_assessments) >= 1
+        assert final_state.status == RunStatus.COMPLETED_WITH_FALLBACK.value
         # The failing group's issue should be completed (fallback)
         assert "TEX_RW_0" in final_state.completed_issue_ids
         assert "TEX_RW_1" in final_state.completed_issue_ids
+
+    def test_parallel_runner_respects_total_step_budget(self):
+        issues = [
+            _make_issue(f"ISSUE_{index}", f"RULE_{index}", "high", f"Textures/{index}.png")
+            for index in range(3)
+        ]
+        audit_result = _make_audit_result(issues)
+
+        class DynamicAgent:
+            model_name = "dynamic-test"
+
+            def get_action(self, issue_data, **kwargs):
+                return {
+                    "action": "finish",
+                    "assessment": {
+                        "issue_id": issue_data["issue_id"],
+                        "risk_level": "low",
+                        "recommended_action": "manual_confirm_required",
+                        "confidence": 0.8,
+                        "summary": "Valid assessment.",
+                    },
+                }
+
+        runner = HarnessRunner(
+            agent=DynamicAgent(),
+            audit_result=audit_result,
+            max_steps=2,
+            trace_enabled=False,
+            max_workers=3,
+            agent_factory=DynamicAgent,
+        )
+        state = RunState(
+            run_id="parallel_budget",
+            project_root="/fake",
+            platform="Android",
+            pending_issue_ids=[issue.issue_id for issue in issues],
+            max_steps=2,
+        )
+
+        final_state = runner.run(state, audit_result)
+
+        assert final_state.step_count == 2
+        assert len(final_state.agent_assessments) == 2
+        assert final_state.status == RunStatus.COMPLETED_WITH_FALLBACK.value
 
     def test_coordinator_peer_broadcast(self):
         """Coordinator broadcasts assessment to peer issues in the same group."""
@@ -792,6 +838,49 @@ class TestPromptRouting:
         # Should get the finish action — specialized prompt is used internally
         assert action["action"] == "finish"
 
+    def test_audit_agent_preserves_structured_tool_context_beyond_300_chars(self):
+        """Semantic tool data should not be truncated by the old 300-char limit."""
+        class CapturingFakeModelClient(FakeModelClient):
+            def get_action(self, system_prompt, tools, messages=None):
+                self.last_prompt = system_prompt
+                return super().get_action(system_prompt, tools, messages)
+
+        client = CapturingFakeModelClient("capture", actions=[{
+            "action": "finish",
+            "assessment": {
+                "issue_id": "TEX_0",
+                "risk_level": "medium",
+                "recommended_action": "manual_confirm_required",
+                "confidence": 0.6,
+                "summary": "Reviewed context.",
+            },
+        }])
+        agent = AuditAgent(client)
+        marker = "semantic_marker_editor_only"
+        tool_result = ToolCallRecord(
+            tool_result_id="tr_context",
+            tool_name="read_code_context",
+            arguments={"file_path": "Assets/Scripts/Test.cs", "line_number": 10},
+            result={
+                "ok": True,
+                "data": {
+                    "padding": "x" * 500,
+                    "semantic_signals": {"execution_scope": marker},
+                },
+            },
+        )
+
+        agent.get_action(
+            issue_data={"issue_id": "TEX_0", "rule_id": "TEX_READ_WRITE_ENABLED"},
+            tool_defs=[],
+            tool_results=[tool_result],
+            step=2,
+            max_steps=12,
+        )
+
+        assert marker in client.last_prompt
+        assert "Structured Context and Fix Plan" in client.last_prompt
+
 
 # ═══════════════════════════════════════════════════════════════════
 # TestHarnessRunnerParallel
@@ -846,6 +935,7 @@ class TestHarnessRunnerParallel:
         audit_result = _make_audit_result([issue_a, issue_b])
 
         counter = {"value": 0}
+        issue_ids = ["TEX_RW_0", "AUD_LONG_0"]
 
         def agent_factory():
             idx = counter["value"]
@@ -853,7 +943,7 @@ class TestHarnessRunnerParallel:
             return _make_fake_agent([{
                 "action": "finish",
                 "assessment": {
-                    "issue_id": f"GROUP_{idx}",
+                    "issue_id": issue_ids[idx],
                     "risk_level": "low",
                     "recommended_action": "auto_fix_candidate",
                     "confidence": 0.8,
@@ -899,6 +989,7 @@ class TestHarnessRunnerParallel:
         audit_result = _make_audit_result([issue_a, issue_b, issue_c])
 
         call_count = {"value": 0}
+        representative_ids = ["TEX_RW_0", "TEX_RW_1"]
 
         def agent_factory():
             idx = call_count["value"]
@@ -906,7 +997,7 @@ class TestHarnessRunnerParallel:
             return _make_fake_agent([{
                 "action": "finish",
                 "assessment": {
-                    "issue_id": f"ISSUE_{idx}",
+                    "issue_id": representative_ids[idx],
                     "risk_level": "low" if idx == 0 else "medium",
                     "recommended_action": "do_not_fix" if idx == 0 else "manual_confirm_required",
                     "confidence": 0.85,
@@ -997,11 +1088,15 @@ class TestThreadSafety:
         ]
         audit_result = _make_audit_result(issues)
 
+        call_count = {"value": 0}
+
         def agent_factory():
+            index = call_count["value"]
+            call_count["value"] += 1
             return _make_fake_agent([{
                 "action": "finish",
                 "assessment": {
-                    "issue_id": "TEX_RW_0",  # Will be overridden per group
+                    "issue_id": issues[index].issue_id,
                     "risk_level": "low",
                     "recommended_action": "auto_fix_candidate",
                     "confidence": 0.8,

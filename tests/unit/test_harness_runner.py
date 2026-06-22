@@ -7,6 +7,7 @@ import json
 from unity_audit.agents.audit_agent import AuditAgent
 from unity_audit.agents.model_client import FakeModelClient
 from unity_audit.application.models import AuditResult
+from unity_audit.evidence import EvidenceResult
 from unity_audit.harness.policy import (
     validate_action,
     validate_call_tool_action,
@@ -132,6 +133,25 @@ class TestPolicy:
         )
         assert valid is False
 
+    def test_validate_finish_rejects_mismatched_issue_id(self):
+        valid, msg = validate_finish_action(
+            {
+                "action": "finish",
+                "assessment": {
+                    "issue_id": "OTHER_ISSUE",
+                    "risk_level": "low",
+                    "recommended_action": "manual_confirm_required",
+                    "confidence": 0.5,
+                    "summary": "Assessment for the wrong issue.",
+                },
+            },
+            set(),
+            original_issue={"issue_id": "CURRENT_ISSUE"},
+        )
+
+        assert valid is False
+        assert "issue_id" in msg
+
     def test_validate_finish_no_do_not_fix_without_evidence(self):
         """do_not_fix without evidence_refs is OK if summary is substantive."""
         # Now allowed: path classification counts as implicit evidence,
@@ -186,7 +206,12 @@ class TestPolicy:
                 },
             },
             set(),
-            original_issue={"rule_id": "X", "severity": "critical", "asset_path": "test.png"},
+            original_issue={
+                "issue_id": "x",
+                "rule_id": "X",
+                "severity": "critical",
+                "asset_path": "test.png",
+            },
         )
         assert valid is True  # Not passing severity, so OK
 
@@ -304,6 +329,206 @@ class TestHarnessWithFakeModel:
         assert final_state.tool_results[0].tool_name == "get_issue"
         assert len(final_state.agent_assessments) == 1
 
+    def test_read_write_grouping_separates_evidence_levels(self, tmp_path):
+        """Read/Write issues with different evidence levels should not share an assessment."""
+        issues = [
+            Issue(
+                issue_id="TEX_RW_DIRECT",
+                rule_id="TEX_READ_WRITE_ENABLED",
+                severity="high",
+                asset_path="Textures/direct.png",
+                title="Read/Write enabled",
+                message="Texture has Read/Write enabled.",
+            ),
+            Issue(
+                issue_id="TEX_RW_NONE",
+                rule_id="TEX_READ_WRITE_ENABLED",
+                severity="high",
+                asset_path="Textures/none.png",
+                title="Read/Write enabled",
+                message="Texture has Read/Write enabled.",
+            ),
+        ]
+        audit_result = _make_minimal_audit_result(issues)
+        audit_result.evidence_map = {
+            "TEX_RW_DIRECT": EvidenceResult(
+                issue_id="TEX_RW_DIRECT",
+                association_level="direct",
+            ),
+            "TEX_RW_NONE": EvidenceResult(
+                issue_id="TEX_RW_NONE",
+                association_level="none",
+            ),
+        }
+
+        fake = FakeModelClient("fake-grouping", actions=[
+            {
+                "action": "finish",
+                "assessment": {
+                    "issue_id": "TEX_RW_DIRECT",
+                    "risk_level": "high",
+                    "recommended_action": "do_not_fix",
+                    "confidence": 0.9,
+                    "summary": "Direct evidence assessment.",
+                    "evidence_refs": [],
+                    "needs_human_review": True,
+                },
+            },
+            {
+                "action": "finish",
+                "assessment": {
+                    "issue_id": "TEX_RW_NONE",
+                    "risk_level": "medium",
+                    "recommended_action": "manual_confirm_required",
+                    "confidence": 0.7,
+                    "summary": "No evidence assessment.",
+                    "evidence_refs": [],
+                    "needs_human_review": True,
+                },
+            },
+        ])
+        agent = AuditAgent(fake)
+        runner = HarnessRunner(
+            agent=agent,
+            audit_result=audit_result,
+            max_steps=12,
+            trace_enabled=False,
+        )
+        state = RunState(
+            run_id="test_evidence_grouping",
+            project_root="/fake",
+            platform="Android",
+            pending_issue_ids=["TEX_RW_DIRECT", "TEX_RW_NONE"],
+            max_steps=12,
+        )
+
+        final_state = runner.run(state, audit_result)
+
+        assert final_state.status == RunStatus.COMPLETED.value
+        assessments = {a.issue_id: a for a in final_state.agent_assessments}
+        assert assessments["TEX_RW_DIRECT"].summary == "Direct evidence assessment."
+        assert assessments["TEX_RW_NONE"].summary == "No evidence assessment."
+        assert fake.call_count == 2
+
+    def test_read_write_auto_fix_requires_code_context_for_direct_evidence(self, tmp_path):
+        """Direct Read/Write evidence should reject auto-fix without source context."""
+        audit_result = _make_minimal_audit_result()
+        issue_id = audit_result.issues[0].issue_id
+        audit_result.evidence_map[issue_id] = EvidenceResult(
+            issue_id=issue_id,
+            association_level="direct",
+        )
+        fake = FakeModelClient("fake-unsafe-auto-fix", actions=[
+            {
+                "action": "finish",
+                "assessment": {
+                    "issue_id": issue_id,
+                    "risk_level": "low",
+                    "recommended_action": "auto_fix_candidate",
+                    "confidence": 0.9,
+                    "summary": "Claiming auto-fix without reading code.",
+                    "evidence_refs": [],
+                    "needs_human_review": False,
+                },
+            },
+        ])
+        runner = HarnessRunner(
+            agent=AuditAgent(fake),
+            audit_result=audit_result,
+            max_steps=12,
+            trace_enabled=False,
+        )
+        state = RunState(
+            run_id="test_reject_unsafe_auto_fix",
+            project_root="/fake",
+            platform="Android",
+            pending_issue_ids=[issue_id],
+            max_steps=12,
+        )
+
+        final_state = runner.run(state, audit_result)
+
+        assert final_state.status == RunStatus.COMPLETED_WITH_FALLBACK.value
+        assert final_state.agent_assessments == []
+        assert any("Assessment rejected" in error for error in final_state.errors)
+
+    def test_read_write_auto_fix_allowed_after_code_context(self, tmp_path):
+        """Direct Read/Write evidence may auto-fix only after read_code_context succeeds."""
+        audit_result = _make_minimal_audit_result()
+        issue_id = audit_result.issues[0].issue_id
+        audit_result.evidence_map[issue_id] = EvidenceResult(
+            issue_id=issue_id,
+            association_level="direct",
+        )
+        registry = ToolRegistry()
+
+        def read_code_context(file_path: str, line_number: int) -> dict:
+            return {
+                "file_path": file_path,
+                "target_line": line_number,
+                "preprocessor_directives": [
+                    {"line": 1, "directive": "if", "content": "#if UNITY_EDITOR"}
+                ],
+            }
+
+        registry.register(ToolDef(
+            name="read_code_context",
+            description="Read source context",
+            func=read_code_context,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "line_number": {"type": "integer"},
+                },
+                "required": ["file_path", "line_number"],
+            },
+        ))
+        fake = FakeModelClient("fake-safe-auto-fix", actions=[
+            {
+                "action": "call_tool",
+                "tool_name": "read_code_context",
+                "arguments": {
+                    "file_path": "Assets/Scripts/TextureUtils.cs",
+                    "line_number": 12,
+                },
+                "reason": "Verify direct code evidence before auto-fix",
+            },
+            {
+                "action": "finish",
+                "assessment": {
+                    "issue_id": issue_id,
+                    "risk_level": "low",
+                    "recommended_action": "auto_fix_candidate",
+                    "confidence": 0.9,
+                    "summary": "Pixel API usage is editor-only, so build auto-fix is safe.",
+                    "evidence_refs": [],
+                    "needs_human_review": False,
+                },
+            },
+        ])
+        runner = HarnessRunner(
+            agent=AuditAgent(fake),
+            audit_result=audit_result,
+            max_steps=12,
+            trace_enabled=False,
+            tool_registry=registry,
+        )
+        state = RunState(
+            run_id="test_allow_auto_fix_after_context",
+            project_root="/fake",
+            platform="Android",
+            pending_issue_ids=[issue_id],
+            max_steps=12,
+        )
+
+        final_state = runner.run(state, audit_result)
+
+        assert final_state.status == RunStatus.COMPLETED.value
+        assert len(final_state.agent_assessments) == 1
+        assert final_state.agent_assessments[0].recommended_action == "auto_fix_candidate"
+        assert final_state.tool_results[0].tool_name == "read_code_context"
+
     def test_max_steps_fallback(self):
         """HARNESS-006: Exceeding max_steps → completed_with_fallback."""
         audit_result = _make_minimal_audit_result()
@@ -394,8 +619,93 @@ class TestHarnessWithFakeModel:
 
         final_state = runner.run(state, audit_result)
         assert len(final_state.errors) >= 1
+        assert final_state.status == RunStatus.COMPLETED_WITH_FALLBACK.value
         # Issue should be marked completed despite fallback
         assert issue_id in final_state.completed_issue_ids
+
+    def test_submit_assessment_uses_full_assessment_validation(self):
+        audit_result = _make_minimal_audit_result()
+        issue_id = audit_result.issues[0].issue_id
+        fake = FakeModelClient("fake-invalid-submit", actions=[{
+            "action": "call_tool",
+            "tool_name": "submit_assessment",
+            "arguments": {
+                "issue_id": issue_id,
+                "risk_level": "extreme",
+                "recommended_action": "auto_fix_candidate",
+                "confidence": 1.5,
+                "summary": "Invalid assessment payload.",
+                "evidence_refs": ["tr_fabricated"],
+            },
+            "reason": "Submit result",
+        }])
+        runner = HarnessRunner(
+            agent=AuditAgent(fake),
+            audit_result=audit_result,
+            max_steps=1,
+            trace_enabled=False,
+        )
+        state = RunState(
+            run_id="invalid_submit",
+            project_root="/fake",
+            platform="Android",
+            pending_issue_ids=[issue_id],
+            max_steps=1,
+        )
+
+        final_state = runner.run(state, audit_result)
+
+        assert final_state.agent_assessments == []
+        assert final_state.status == RunStatus.COMPLETED_WITH_FALLBACK.value
+        assert any("risk_level" in error for error in final_state.errors)
+
+    def test_max_steps_is_a_hard_run_budget(self):
+        issues = [
+            Issue(
+                issue_id=f"ISSUE_{index}",
+                rule_id=f"RULE_{index}",
+                severity="high",
+                asset_path=f"Textures/{index}.png",
+                title="Issue",
+                message="Issue",
+                evidence={},
+                suggestion="Review",
+            )
+            for index in range(3)
+        ]
+        audit_result = _make_minimal_audit_result(issues)
+        actions = [
+            {
+                "action": "finish",
+                "assessment": {
+                    "issue_id": issue.issue_id,
+                    "risk_level": "low",
+                    "recommended_action": "manual_confirm_required",
+                    "confidence": 0.8,
+                    "summary": "Valid assessment.",
+                },
+            }
+            for issue in issues
+        ]
+        runner = HarnessRunner(
+            agent=AuditAgent(FakeModelClient("fake-budget", actions=actions)),
+            audit_result=audit_result,
+            max_steps=2,
+            trace_enabled=False,
+        )
+        state = RunState(
+            run_id="hard_budget",
+            project_root="/fake",
+            platform="Android",
+            pending_issue_ids=[issue.issue_id for issue in issues],
+            max_steps=2,
+        )
+
+        final_state = runner.run(state, audit_result)
+
+        assert final_state.step_count == 2
+        assert len(final_state.agent_assessments) == 2
+        assert final_state.status == RunStatus.COMPLETED_WITH_FALLBACK.value
 
     def test_duplicate_tool_failure_retry_once(self):
         """HARNESS-005: Same tool+params failure retries only once."""

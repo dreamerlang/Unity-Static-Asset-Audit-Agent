@@ -41,6 +41,9 @@ class AgentAssessment:
     summary: str
     evidence_refs: list[str] = field(default_factory=list)
     needs_human_review: bool = False
+    usage_context: str = "unknown"
+    evidence_strength: str = "none"
+    fix_plan: dict | None = None
 
 
 @dataclass
@@ -158,6 +161,9 @@ class RunState:
                     "summary": a.summary,
                     "evidence_refs": a.evidence_refs,
                     "needs_human_review": a.needs_human_review,
+                    "usage_context": a.usage_context,
+                    "evidence_strength": a.evidence_strength,
+                    "fix_plan": a.fix_plan,
                 }
                 for a in self.agent_assessments
             ],
@@ -200,6 +206,9 @@ class RunState:
                 summary=a["summary"],
                 evidence_refs=a.get("evidence_refs", []),
                 needs_human_review=a.get("needs_human_review", False),
+                usage_context=a.get("usage_context", "unknown"),
+                evidence_strength=a.get("evidence_strength", "none"),
+                fix_plan=a.get("fix_plan"),
             ))
         return state
 
@@ -229,6 +238,27 @@ class RunState:
                     "summary": a.summary,
                     "evidence_refs": a.evidence_refs,
                     "needs_human_review": a.needs_human_review,
+                    "usage_context": a.usage_context,
+                    "evidence_strength": a.evidence_strength,
+                    "fix_plan": a.fix_plan,
                 } for a in self.agent_assessments],
                 f, ensure_ascii=False, indent=2,
             )
+
+    def save_fix_plans(self, path: str):
+        """Save structured Agent fix plans to a standalone JSON file."""
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        plans = [
+            {
+                "issue_id": assessment.issue_id,
+                "recommended_action": assessment.recommended_action,
+                "confidence": assessment.confidence,
+                "usage_context": assessment.usage_context,
+                "evidence_strength": assessment.evidence_strength,
+                "fix_plan": assessment.fix_plan,
+            }
+            for assessment in self.agent_assessments
+            if assessment.fix_plan is not None
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(plans, f, ensure_ascii=False, indent=2)

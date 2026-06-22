@@ -20,7 +20,11 @@ Multi-Agent (v0.1):
 import uuid
 
 from unity_audit.application.models import AuditResult
-from unity_audit.harness.policy import validate_action
+from unity_audit.harness.assessment_guardrails import (
+    retarget_fix_plan,
+    validate_assessment_guardrails,
+)
+from unity_audit.harness.policy import validate_action, validate_assessment_payload
 from unity_audit.harness.state import (
     AgentAssessment,
     RunState,
@@ -120,13 +124,18 @@ class HarnessRunner:
                 platform=state.platform,
             )
 
+        target_issue_ids = list(state.pending_issue_ids)
+
         try:
             state.status = RunStatus.RUNNING.value
 
-            # Phase 1: Group issues by (rule_id, severity, path_category) for dedup.
+            # Phase 1: Group issues by (rule_id, severity, path_category, evidence level)
+            # for dedup.
             # path_category ensures ReferenceImages/ and Scenes/ are NOT lumped
             # together — they need different risk assessments.
-            pending_by_key: dict[tuple[str, str, str], list[str]] = {}
+            # evidence_association_level keeps high-risk Read/Write evidence groups
+            # separate, so direct/possible/none do not share one LLM assessment.
+            pending_by_key: dict[tuple[str, str, str, str], list[str]] = {}
             for issue_id in list(state.pending_issue_ids):
                 issue_data = self._get_issue_data(issue_id, audit_result)
                 if issue_data is None:
@@ -137,16 +146,10 @@ class HarnessRunner:
                     issue_data["rule_id"],
                     issue_data["severity"],
                     issue_data["path_category"],
+                    issue_data["evidence_association_level"],
                 )
                 pending_by_key.setdefault(key, []).append(issue_id)
             state.pending_issue_ids = []
-
-            # Phase 2: Process one representative per group, broadcast assessment.
-            # Auto-scale max_steps: each group needs ~5 steps.
-            group_count = len(pending_by_key)
-            effective_max = max(state.max_steps, group_count * 5)
-            if effective_max > state.max_steps:
-                state.max_steps = effective_max
 
             # Build groups list
             groups: list[tuple] = []
@@ -171,7 +174,8 @@ class HarnessRunner:
                     tool_registry=self.tool_registry,
                     audit_result=audit_result,
                     max_workers=self.max_workers,
-                    max_steps_per_group=effective_max,
+                    max_steps_per_group=state.max_steps,
+                    max_total_steps=max(0, state.max_steps - state.step_count),
                     trace_enabled=self.trace_enabled,
                 )
                 state = coordinator.dispatch(
@@ -217,6 +221,9 @@ class HarnessRunner:
                                 summary=peer_summary,
                                 evidence_refs=list(assessment.evidence_refs),
                                 needs_human_review=assessment.needs_human_review,
+                                usage_context=assessment.usage_context,
+                                evidence_strength=assessment.evidence_strength,
+                                fix_plan=retarget_fix_plan(assessment.fix_plan, peer_asset),
                             )
                             state.add_assessment(peer_assessment)
                             state.complete_issue(peer_id)
@@ -232,11 +239,11 @@ class HarnessRunner:
                         for peer_id in peers:
                             state.complete_issue(peer_id)
 
-            # Check if all issues were processed
-            if not pending_by_key:
+            assessed_issue_ids = {a.issue_id for a in state.agent_assessments}
+            if all(issue_id in assessed_issue_ids for issue_id in target_issue_ids):
                 state.status = RunStatus.COMPLETED.value
-            elif state.status != RunStatus.COMPLETED_WITH_FALLBACK.value:
-                state.status = RunStatus.COMPLETED.value
+            else:
+                state.status = RunStatus.COMPLETED_WITH_FALLBACK.value
 
         except Exception as e:
             state.status = RunStatus.COMPLETED_WITH_FALLBACK.value
@@ -347,7 +354,7 @@ class HarnessRunner:
                 action = self.agent.get_action(
                     issue_data=issue_data,
                     tool_defs=tool_defs,
-                    tool_results=state.tool_results,
+                    tool_results=state.tool_results[results_before:],
                     step=step,
                     max_steps=self.max_steps,
                     rule_id=issue_data.get("rule_id"),
@@ -392,7 +399,22 @@ class HarnessRunner:
                     summary=assessment_dict["summary"],
                     evidence_refs=assessment_dict.get("evidence_refs", []),
                     needs_human_review=assessment_dict.get("needs_human_review", False),
+                    usage_context=assessment_dict.get("usage_context", "unknown"),
+                    evidence_strength=assessment_dict.get("evidence_strength", "none"),
+                    fix_plan=assessment_dict.get("fix_plan"),
                 )
+                valid_assessment, assessment_error = validate_assessment_guardrails(
+                    issue_data,
+                    agent_assessment,
+                    state.tool_results[results_before:],
+                )
+                if not valid_assessment:
+                    if self.trace_writer:
+                        self.trace_writer.guardrail_triggered(
+                            step, issue_id, f"Assessment: {assessment_error}"
+                        )
+                    state.add_error(f"Assessment rejected for {issue_id}: {assessment_error}")
+                    return
                 if add_to_state:
                     state.add_assessment(agent_assessment)
                     return  # Issue done (standalone)
@@ -453,7 +475,38 @@ class HarnessRunner:
                         summary=arguments.get("summary", ""),
                         evidence_refs=arguments.get("evidence_refs", []),
                         needs_human_review=arguments.get("needs_human_review", False),
+                        usage_context=arguments.get("usage_context", "unknown"),
+                        evidence_strength=arguments.get("evidence_strength", "none"),
+                        fix_plan=arguments.get("fix_plan"),
                     )
+                    valid_payload, payload_error = validate_assessment_payload(
+                        arguments,
+                        existing_result_ids - {result.tool_result_id},
+                        original_issue=issue_data,
+                    )
+                    if not valid_payload:
+                        if self.trace_writer:
+                            self.trace_writer.guardrail_triggered(
+                                step, issue_id, f"Assessment: {payload_error}"
+                            )
+                        state.add_error(
+                            f"Assessment rejected for {issue_id}: {payload_error}"
+                        )
+                        return
+                    valid_assessment, assessment_error = validate_assessment_guardrails(
+                        issue_data,
+                        assessment,
+                        state.tool_results[results_before:],
+                    )
+                    if not valid_assessment:
+                        if self.trace_writer:
+                            self.trace_writer.guardrail_triggered(
+                                step, issue_id, f"Assessment: {assessment_error}"
+                            )
+                        state.add_error(
+                            f"Assessment rejected for {issue_id}: {assessment_error}"
+                        )
+                        return
                     if add_to_state:
                         state.add_assessment(assessment)
                         return  # Issue done (standalone mode, void return)
@@ -531,7 +584,11 @@ class HarnessRunner:
                     "suggestion": issue.suggestion,
                     "auto_fixable": issue.auto_fixable,
                     "path_category": self._classify_path(issue.asset_path),
+                    "evidence_association_level": "none",
                 }
+                evidence = audit_result.evidence_map.get(issue_id)
+                if evidence is not None:
+                    data["evidence_association_level"] = evidence.association_level
                 # Include deterministic fix decision so agent can skip get_issue_detail
                 decision = None
                 for d in audit_result.fix_decisions:

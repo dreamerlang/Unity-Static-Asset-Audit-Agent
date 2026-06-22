@@ -21,10 +21,57 @@ VALID_RECOMMENDED_ACTIONS = {
 # Allowed agent action types
 VALID_AGENT_ACTIONS = {"call_tool", "finish"}
 
+VALID_USAGE_CONTEXTS = {
+    "ui", "world_space_ui", "character", "environment", "editor_only",
+    "test_only", "third_party", "runtime_generated", "audio_sfx",
+    "audio_music", "scene", "unknown",
+}
+VALID_EVIDENCE_STRENGTHS = {"direct", "possible", "none"}
+VALID_FIX_TYPES = {"importer_setting", "editor_script", "manual_action", "no_change"}
+
 
 class PolicyViolation(Exception):
     """Raised when an agent action violates policy."""
     pass
+
+
+def validate_assessment_extensions(payload: dict) -> tuple[bool, str | None]:
+    """Validate optional structured context and fix-plan fields."""
+    usage_context = payload.get("usage_context", "unknown")
+    if usage_context not in VALID_USAGE_CONTEXTS:
+        return False, f"Invalid usage_context: {usage_context}"
+
+    evidence_strength = payload.get("evidence_strength", "none")
+    if evidence_strength not in VALID_EVIDENCE_STRENGTHS:
+        return False, f"Invalid evidence_strength: {evidence_strength}"
+
+    fix_plan = payload.get("fix_plan")
+    if fix_plan is None:
+        return True, None
+    if not isinstance(fix_plan, dict):
+        return False, "fix_plan must be an object or null"
+
+    required = {
+        "fix_type", "target_asset", "changes",
+        "verification_steps", "requires_approval",
+    }
+    missing = sorted(required - set(fix_plan))
+    if missing:
+        return False, f"fix_plan missing required fields: {', '.join(missing)}"
+    if fix_plan["fix_type"] not in VALID_FIX_TYPES:
+        return False, f"Invalid fix_type: {fix_plan['fix_type']}"
+    if not isinstance(fix_plan["target_asset"], str) or not fix_plan["target_asset"]:
+        return False, "fix_plan.target_asset must be a non-empty string"
+    if not isinstance(fix_plan["changes"], dict):
+        return False, "fix_plan.changes must be an object"
+    if not isinstance(fix_plan["verification_steps"], list) or not all(
+        isinstance(step, str) for step in fix_plan["verification_steps"]
+    ):
+        return False, "fix_plan.verification_steps must be an array of strings"
+    if fix_plan["requires_approval"] is not True:
+        return False, "fix_plan.requires_approval must be true"
+
+    return True, None
 
 
 def validate_call_tool_action(
@@ -91,6 +138,22 @@ def validate_finish_action(
     if not isinstance(assessment, dict):
         return False, "Assessment must be a JSON object"
 
+    return validate_assessment_payload(
+        assessment,
+        existing_tool_result_ids,
+        original_issue=original_issue,
+    )
+
+
+def validate_assessment_payload(
+    assessment: dict,
+    existing_tool_result_ids: set[str],
+    original_issue: dict | None = None,
+) -> tuple[bool, str | None]:
+    """Validate an assessment regardless of how the model submitted it."""
+    if not isinstance(assessment, dict):
+        return False, "Assessment must be a JSON object"
+
     # Required fields
     if "issue_id" not in assessment:
         return False, "Assessment missing 'issue_id'"
@@ -126,6 +189,10 @@ def validate_finish_action(
         if ref not in existing_tool_result_ids:
             return False, f"Evidence ref '{ref}' does not exist in this run"
 
+    extensions_valid, extensions_error = validate_assessment_extensions(assessment)
+    if not extensions_valid:
+        return False, extensions_error
+
     # Cannot set do_not_fix without evidence or a substantive summary.
     # Path classification and issue detail data count as implicit evidence —
     # the agent always calls get_issue_detail first, so it always has context.
@@ -139,6 +206,11 @@ def validate_finish_action(
 
     # If original issue provided, check no modification of deterministic fields
     if original_issue:
+        if assessment["issue_id"] != original_issue.get("issue_id"):
+            return False, (
+                "Assessment issue_id must match the current issue: "
+                f"expected {original_issue.get('issue_id')}, got {assessment['issue_id']}"
+            )
         if "rule_id" in assessment:
             return False, "Assessment must not modify rule_id"
         if "severity" in assessment:

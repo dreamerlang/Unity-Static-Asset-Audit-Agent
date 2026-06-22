@@ -7,7 +7,9 @@ import sys
 from unity_audit.application.audit_service import AuditService
 from unity_audit.application.models import AuditRequest
 from unity_audit.config import AuditConfig, load_config, merge_cli_with_config
-from unity_audit.fix_planner import FixDecision
+from unity_audit.harness.assessment_guardrails import (
+    reconcile_agent_assessment_with_decision,
+)
 from unity_audit.report import (
     _dict_to_evidence_result,
     _dict_to_fix_decision,
@@ -368,6 +370,8 @@ def _run_agent_mode(
                 # Save assessments
                 assessments_path = os.path.join(output_dir, "agent_assessments.json")
                 final_state.save_assessments(assessments_path)
+                fix_plans_path = os.path.join(output_dir, "agent_fix_plans.json")
+                final_state.save_fix_plans(fix_plans_path)
 
                 if final_state.status == RunStatus.COMPLETED:
                     agent_used = True
@@ -439,16 +443,9 @@ def _run_agent_mode(
             for d in merged_decisions:
                 agent_a = assessment_by_id.get(d.issue_id)
                 if agent_a:
-                    agent_merged.append(FixDecision(
-                        issue_id=d.issue_id,
-                        rule_id=d.rule_id,
-                        asset_path=d.asset_path,
-                        severity=d.severity,
-                        action=agent_a.recommended_action,
-                        risk_level=agent_a.risk_level,
-                        reason=agent_a.summary,
-                        suggestion=d.suggestion,
-                    ))
+                    agent_merged.append(
+                        reconcile_agent_assessment_with_decision(d, agent_a)
+                    )
                 else:
                     agent_merged.append(d)
             merged_decisions = agent_merged
@@ -569,6 +566,29 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """Record a human audit decision for future Agent runs."""
+    from unity_audit.harness.feedback import append_project_feedback
+
+    project_root = os.path.abspath(args.project)
+    if not os.path.isdir(project_root):
+        print(f"Project directory not found: {project_root}", file=sys.stderr)
+        return 1
+    try:
+        record = append_project_feedback(
+            project_root=project_root,
+            rule_id=args.rule_id,
+            asset_path_pattern=args.asset_pattern,
+            decision=args.decision,
+            reason=args.reason,
+        )
+    except (OSError, ValueError) as e:
+        print(f"Failed to record feedback: {e}", file=sys.stderr)
+        return 2
+    print(f"Feedback recorded: {record.feedback_id}")
+    return 0
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -579,11 +599,14 @@ def main():
 
     # scan command (kept for backward compatibility)
     _build_scan_parser(subparsers)
+    _build_feedback_parser(subparsers)
 
     args = parser.parse_args()
 
     if args.command == "scan":
         return cmd_scan(args)
+    elif args.command == "feedback":
+        return cmd_feedback(args)
     elif args.command is None:
         parser.print_help()
         return 0
@@ -673,6 +696,27 @@ def _build_scan_parser(subparsers):
         const="deprecated",
         help="[DEPRECATED] Use --agent instead",
     )
+
+
+def _build_feedback_parser(subparsers):
+    """Build the project feedback subparser."""
+    feedback_parser = subparsers.add_parser(
+        "feedback",
+        help="Record a human decision for future Agent runs",
+    )
+    feedback_parser.add_argument("project", help="Path to the Unity project root")
+    feedback_parser.add_argument("--rule-id", required=True, help="Audit rule ID or *")
+    feedback_parser.add_argument(
+        "--asset-pattern",
+        required=True,
+        help="Asset path glob, e.g. ReferenceImages/**",
+    )
+    feedback_parser.add_argument(
+        "--decision",
+        required=True,
+        choices=["accepted_fix", "rejected_fix", "false_positive", "manual_exception"],
+    )
+    feedback_parser.add_argument("--reason", required=True, help="Human review rationale")
 
 
 if __name__ == "__main__":

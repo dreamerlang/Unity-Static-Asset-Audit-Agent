@@ -40,6 +40,7 @@ class TestCLIAgent:
         # Should output agent files
         assert (output_dir / "run.json").exists()
         assert (output_dir / "agent_assessments.json").exists()
+        assert (output_dir / "agent_fix_plans.json").exists()
 
     def test_agent_mode_without_api_key_completes(self, tmp_path):
         """CLI-003: Agent mode without API key falls back successfully."""

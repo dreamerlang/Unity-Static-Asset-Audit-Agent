@@ -4,6 +4,7 @@ import os
 import tempfile
 
 from unity_audit.application.models import AuditResult
+from unity_audit.evidence import CodeEvidence, EvidenceResult
 from unity_audit.harness.default_tools import READ_CODE_CONTEXT_PARAMS, build_default_tools
 from unity_audit.harness.tools import ToolRegistry
 from unity_audit.rules.engine import Issue
@@ -35,6 +36,60 @@ def _register_tools(audit_result):
     for tool_def in build_default_tools(audit_result):
         registry.register(tool_def)
     return registry
+
+
+class TestSearchAssetCode:
+    """Tests for the search_asset_code agent tool."""
+
+    def test_search_asset_code_preserves_evidence_fields_and_summary(self):
+        """Should expose CodeEvidence fields using current and compatible names."""
+        audit_result = _make_minimal_audit_result()
+        issue = audit_result.issues[0]
+        audit_result.evidence_map[issue.issue_id] = EvidenceResult(
+            issue_id=issue.issue_id,
+            association_level="direct",
+            code_evidence=[
+                CodeEvidence(
+                    file="Assets/Scripts/TextureUtils.cs",
+                    line=12,
+                    content='linkedTexture.GetPixels();',
+                    api="GetPixels",
+                    association_type="direct",
+                    association_value="name=linkedTexture",
+                    confidence=0.95,
+                ),
+                CodeEvidence(
+                    file="Assets/Scripts/TextureUtils.cs",
+                    line=20,
+                    content='otherTexture.SetPixels(colors);',
+                    api="SetPixels",
+                    association_type="possible",
+                    association_value="name=test",
+                    confidence=0.5,
+                ),
+            ],
+        )
+        registry = _register_tools(audit_result)
+
+        result = registry.execute("search_asset_code", {
+            "asset_path": "Textures/test.png",
+        })
+
+        assert result.ok, f"Tool failed: {result.message}"
+        data = result.data
+        assert data["match_count"] == 2
+        assert data["association_summary"] == {
+            "direct": 1,
+            "possible": 1,
+            "none": 0,
+        }
+        first = data["matches"][0]
+        assert first["content"] == 'linkedTexture.GetPixels();'
+        assert first["match"] == first["content"]
+        assert first["association_type"] == "direct"
+        assert first["association_level"] == "direct"
+        assert first["association_value"] == "name=linkedTexture"
+        assert first["confidence"] == 0.95
 
 
 class TestReadCodeContext:
@@ -296,6 +351,10 @@ public class TestClass : MonoBehaviour
                 f"Should detect #if UNITY_EDITOR directive, got: {directives}"
             assert "endif" in directives, \
                 f"Should detect #endif directive, got: {directives}"
+            semantic = data["semantic_signals"]
+            assert semantic["execution_scope"] == "editor_only"
+            assert semantic["enclosing_method"] == "EditorOnlyMethod"
+            assert "GetPixels" in semantic["relevant_api_calls"]
         finally:
             os.unlink(temp_path)
 

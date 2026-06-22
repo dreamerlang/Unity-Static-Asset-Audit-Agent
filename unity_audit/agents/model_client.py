@@ -12,6 +12,7 @@ Factory function create_model_client() picks the right implementation.
 import json
 import os
 import re
+import urllib.error
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -295,6 +296,7 @@ class AnthropicModelClient(ModelClient):
     def __init__(self, model: str = "claude-sonnet-4-6",
                  api_key: str | None = None,
                  timeout: int = 60):
+        super().__init__()
         self._model = model
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._timeout = timeout
@@ -330,8 +332,9 @@ class AnthropicModelClient(ModelClient):
                     messages=msg_list if msg_list else [
                         {"role": "user", "content": "Please analyze the current issue and take the next action."}
                     ],
-                    tools=tools,
+                    tools=self._to_anthropic_tools(tools),
                 )
+                self._record_usage(response.usage)
 
                 # Extract tool use or text
                 for block in response.content:
@@ -365,12 +368,13 @@ class AnthropicModelClient(ModelClient):
                     "messages": messages or [
                         {"role": "user", "content": "Please analyze the current issue and take the next action."}
                     ],
-                    "tools": tools,
+                    "tools": self._to_anthropic_tools(tools),
                 }).encode("utf-8")
 
                 req = urllib.request.Request(url, data=body, headers=headers)
                 with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
+                self._record_usage(data.get("usage", {}))
 
                 for block in data.get("content", []):
                     if block.get("type") == "tool_use":
@@ -389,6 +393,34 @@ class AnthropicModelClient(ModelClient):
             raise ModelError(f"Anthropic API HTTP {e.code}: {e.reason}") from e
         except Exception as e:
             raise ModelError(f"Anthropic API error: {e}") from e
+
+    @staticmethod
+    def _to_anthropic_tools(tools: list[dict]) -> list[dict]:
+        """Convert OpenAI function definitions to Anthropic tool definitions."""
+        converted = []
+        for tool in tools:
+            function = tool.get("function", tool)
+            converted.append({
+                "name": function["name"],
+                "description": function.get("description", ""),
+                "input_schema": function.get(
+                    "parameters", function.get("input_schema", {"type": "object"})
+                ),
+            })
+        return converted
+
+    def _record_usage(self, usage) -> None:
+        """Record one successful Anthropic API response."""
+        self._call_count += 1
+        if isinstance(usage, dict):
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+        else:
+            input_tokens = getattr(usage, "input_tokens", 0)
+            output_tokens = getattr(usage, "output_tokens", 0)
+        self._total_usage.prompt_tokens += input_tokens
+        self._total_usage.completion_tokens += output_tokens
+        self._total_usage.total_tokens += input_tokens + output_tokens
 
 
 # ── Factory ────────────────────────────────────────────────────────────

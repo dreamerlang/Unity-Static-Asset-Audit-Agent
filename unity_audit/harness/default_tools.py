@@ -130,6 +130,43 @@ SUBMIT_ASSESSMENT_PARAMS = {
             "items": {"type": "string"},
             "description": "List of tool_result_ids used as evidence",
         },
+        "usage_context": {
+            "type": "string",
+            "enum": [
+                "ui", "world_space_ui", "character", "environment",
+                "editor_only", "test_only", "third_party", "runtime_generated",
+                "audio_sfx", "audio_music", "scene", "unknown",
+            ],
+            "description": "Inferred usage context for this asset",
+            "default": "unknown",
+        },
+        "evidence_strength": {
+            "type": "string",
+            "enum": ["direct", "possible", "none"],
+            "description": "Strength of evidence supporting the assessment",
+            "default": "none",
+        },
+        "fix_plan": {
+            "type": ["object", "null"],
+            "description": "Structured candidate fix plan; requires_approval must be true",
+            "properties": {
+                "fix_type": {
+                    "type": "string",
+                    "enum": ["importer_setting", "editor_script", "manual_action", "no_change"],
+                },
+                "target_asset": {"type": "string"},
+                "changes": {"type": "object"},
+                "verification_steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "requires_approval": {"type": "boolean"},
+            },
+            "required": [
+                "fix_type", "target_asset", "changes",
+                "verification_steps", "requires_approval",
+            ],
+        },
     },
     "required": ["issue_id", "risk_level", "recommended_action", "confidence", "summary"],
 }
@@ -150,6 +187,13 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
         List of ToolDef ready for registration in a ToolRegistry.
     """
     project_root = audit_result.project_root
+
+    from unity_audit.harness.feedback import (
+        find_relevant_feedback,
+        load_project_feedback,
+    )
+
+    _feedback_records, _feedback_warnings = load_project_feedback(project_root)
 
     # Pre-compute lookup maps for efficient access
     _issues_by_id = {i.issue_id: i for i in audit_result.issues}
@@ -296,6 +340,7 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
                 "context_summary": evidence.context_summary,
                 "risk_hint": evidence.risk_hint,
                 "need_manual_confirm": evidence.need_manual_confirm,
+                "association_level": evidence.association_level,
                 "code_search_result": evidence.code_search_result[:10] if evidence.code_search_result else [],
                 "code_search_result_count": len(evidence.code_search_result) if evidence.code_search_result else 0,
             }
@@ -326,6 +371,12 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
             "extracted_properties": extracted_data,
             "code_evidence": evidence_data,
             "deterministic_fix_decision": decision_data,
+            "historical_feedback": find_relevant_feedback(
+                _feedback_records,
+                issue.rule_id,
+                issue.asset_path,
+            ),
+            "feedback_warnings": _feedback_warnings,
             "related_issues_on_same_asset": [
                 {"issue_id": i.issue_id, "rule_id": i.rule_id, "severity": i.severity}
                 for i in _issues_by_asset.get(issue.asset_path, [])
@@ -428,15 +479,24 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
                     key = (match.get("file", ""), match.get("line", 0), match.get("api", ""))
                     if key not in seen_keys:
                         seen_keys.add(key)
+                        association_type = match.get(
+                            "association_type",
+                            match.get("association_level", "none"),
+                        )
+                        content = match.get("content", match.get("match", ""))
                         item = {
                             "file": match.get("file", ""),
                             "line": match.get("line", 0),
-                            "match": match.get("match", ""),
+                            "content": content,
+                            "match": content,  # Backward-compatible alias.
                             "api": match.get("api", ""),
-                            "association_level": match.get("association_level", "none"),
-                            "context": match.get("context", ""),
+                            "association_type": association_type,
+                            "association_level": association_type,  # Backward-compatible alias.
+                            "association_value": match.get("association_value", ""),
+                            "confidence": match.get("confidence", 0.0),
+                            "context": match.get("context", content),
                         }
-                        if search_type == "api_usage" and item["api"] == "none":
+                        if search_type == "api_usage" and not item["api"]:
                             continue
                         all_matches.append(item)
 
@@ -451,9 +511,9 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
             "match_count": len(all_matches),
             "matches": all_matches[:20],  # Limit to 20
             "association_summary": {
-                "direct": sum(1 for m in all_matches if m.get("association_level") == "direct"),
-                "possible": sum(1 for m in all_matches if m.get("association_level") == "possible"),
-                "none": sum(1 for m in all_matches if m.get("association_level") == "none"),
+                "direct": sum(1 for m in all_matches if m.get("association_type") == "direct"),
+                "possible": sum(1 for m in all_matches if m.get("association_type") == "possible"),
+                "none": sum(1 for m in all_matches if m.get("association_type") == "none"),
             },
         })
 
@@ -597,6 +657,10 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
                 "content": all_lines[i].rstrip('\n\r'),
             })
 
+        from unity_audit.harness.code_semantics import analyze_code_context
+
+        semantic_signals = analyze_code_context(file_path, all_lines, line_number)
+
         return ToolResult(ok=True, data={
             "file_path": file_path,
             "resolved_path": resolved,
@@ -608,6 +672,7 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
             "method_start": method_start,
             "method_end": method_end,
             "preprocessor_directives": pp_directives,
+            "semantic_signals": semantic_signals.to_dict(),
             "code_lines": code_lines,
         })
 
@@ -777,10 +842,27 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
         summary: str,
         needs_human_review: bool = False,
         evidence_refs: list[str] | None = None,
+        usage_context: str = "unknown",
+        evidence_strength: str = "none",
+        fix_plan: dict | None = None,
     ) -> ToolResult:
         """Submit the final assessment for an issue. Call this when done analyzing."""
         if evidence_refs is None:
             evidence_refs = []
+        from unity_audit.harness.policy import validate_assessment_extensions
+
+        valid, error = validate_assessment_extensions({
+            "usage_context": usage_context,
+            "evidence_strength": evidence_strength,
+            "fix_plan": fix_plan,
+        })
+        if not valid:
+            return ToolResult(
+                ok=False,
+                error_code="INVALID_ASSESSMENT",
+                message=error or "Invalid structured assessment fields",
+                retryable=False,
+            )
         _submitted_assessment["assessment"] = {
             "issue_id": issue_id,
             "risk_level": risk_level,
@@ -789,6 +871,9 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
             "summary": summary,
             "needs_human_review": needs_human_review,
             "evidence_refs": evidence_refs,
+            "usage_context": usage_context,
+            "evidence_strength": evidence_strength,
+            "fix_plan": fix_plan,
         }
         return ToolResult(
             ok=True,

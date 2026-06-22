@@ -9,6 +9,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from unity_audit.application.models import AuditResult
+from unity_audit.harness.assessment_guardrails import retarget_fix_plan
 from unity_audit.harness.state import (
     AgentAssessment,
     RunState,
@@ -45,6 +46,7 @@ class GroupCoordinator:
         audit_result: AuditResult,
         max_workers: int = 5,
         max_steps_per_group: int = 20,
+        max_total_steps: int | None = None,
         trace_enabled: bool = True,
     ):
         if max_workers < 1:
@@ -55,6 +57,7 @@ class GroupCoordinator:
         self.audit_result = audit_result
         self.max_workers = max_workers
         self.max_steps_per_group = max_steps_per_group
+        self.max_total_steps = max_total_steps
         self.trace_enabled = trace_enabled
 
         # Lock for merging results and writing trace
@@ -114,8 +117,13 @@ class GroupCoordinator:
             result = worker.run(group_key, rep_data, peer_ids, trace_writer)
             self._merge_result(master_state, result, trace_writer)
 
-        if not master_state.is_terminal():
-            master_state.status = RunStatus.COMPLETED.value
+        expected = {rep_data["issue_id"] for _, rep_data, _ in groups}
+        assessed = {assessment.issue_id for assessment in master_state.agent_assessments}
+        master_state.status = (
+            RunStatus.COMPLETED.value
+            if expected.issubset(assessed)
+            else RunStatus.COMPLETED_WITH_FALLBACK.value
+        )
 
         return master_state
 
@@ -129,17 +137,33 @@ class GroupCoordinator:
         # Limit workers to number of groups
         actual_workers = min(self.max_workers, len(groups))
 
+        if self.max_total_steps is None:
+            budgets = [self.max_steps_per_group] * len(groups)
+        else:
+            base, remainder = divmod(self.max_total_steps, len(groups))
+            budgets = [base + (1 if index < remainder else 0)
+                       for index in range(len(groups))]
+
+        results: list[WorkerResult] = []
         with ThreadPoolExecutor(max_workers=actual_workers) as executor:
             # Submit all groups
             futures = {}
             for i, (group_key, rep_data, peer_ids) in enumerate(groups):
                 # Each worker gets its own AuditAgent instance
                 agent = self.agent_factory()
+                if budgets[i] == 0:
+                    results.append(WorkerResult(
+                        group_key=group_key,
+                        representative_id=rep_data["issue_id"],
+                        peer_ids=list(peer_ids),
+                        fallback=True,
+                    ))
+                    continue
                 worker = GroupWorker(
                     agent=agent,
                     tool_registry=self.tool_registry,
                     audit_result=self.audit_result,
-                    max_steps=self.max_steps_per_group,
+                    max_steps=min(self.max_steps_per_group, budgets[i]),
                     trace_enabled=self.trace_enabled,
                     worker_id=i,
                 )
@@ -166,18 +190,19 @@ class GroupCoordinator:
                     )
 
                 self._merge_result(master_state, result, trace_writer)
+                results.append(result)
                 completed_count += 1
 
+        for result in results:
+            if result.step_count == 0 and result.fallback:
+                self._merge_result(master_state, result, trace_writer)
+
         # Determine final status
-        if not master_state.is_terminal():
-            all_success = all(
-                a is not None for a in [
-                    r.assessment for r in [
-                        # We can't access results after merge, check assessments
-                    ]
-                ]
-            )
-            master_state.status = RunStatus.COMPLETED.value
+        master_state.status = (
+            RunStatus.COMPLETED.value
+            if results and all(result.success for result in results)
+            else RunStatus.COMPLETED_WITH_FALLBACK.value
+        )
 
         return master_state
 
@@ -219,6 +244,9 @@ class GroupCoordinator:
                         summary=assessment.summary,
                         evidence_refs=list(assessment.evidence_refs),
                         needs_human_review=assessment.needs_human_review,
+                        usage_context=assessment.usage_context,
+                        evidence_strength=assessment.evidence_strength,
+                        fix_plan=assessment.fix_plan,
                     )
                 master_state.add_assessment(assessment)
                 master_state.complete_issue(result.representative_id)
@@ -239,6 +267,9 @@ class GroupCoordinator:
                         summary=peer_summary,
                         evidence_refs=list(assessment.evidence_refs),
                         needs_human_review=assessment.needs_human_review,
+                        usage_context=assessment.usage_context,
+                        evidence_strength=assessment.evidence_strength,
+                        fix_plan=retarget_fix_plan(assessment.fix_plan, peer_asset),
                     )
                     master_state.add_assessment(peer_assessment)
                     master_state.complete_issue(peer_id)

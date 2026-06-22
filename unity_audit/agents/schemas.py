@@ -58,6 +58,41 @@ FINISH_SCHEMA = {
                     "items": {"type": "string"},
                 },
                 "needs_human_review": {"type": "boolean"},
+                "usage_context": {
+                    "type": "string",
+                    "enum": [
+                        "ui", "world_space_ui", "character", "environment",
+                        "editor_only", "test_only", "third_party", "runtime_generated",
+                        "audio_sfx", "audio_music", "scene", "unknown",
+                    ],
+                },
+                "evidence_strength": {
+                    "type": "string",
+                    "enum": ["direct", "possible", "none"],
+                },
+                "fix_plan": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "fix_type": {
+                            "type": "string",
+                            "enum": [
+                                "importer_setting", "editor_script",
+                                "manual_action", "no_change",
+                            ],
+                        },
+                        "target_asset": {"type": "string"},
+                        "changes": {"type": "object"},
+                        "verification_steps": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "requires_approval": {"type": "boolean"},
+                    },
+                    "required": [
+                        "fix_type", "target_asset", "changes",
+                        "verification_steps", "requires_approval",
+                    ],
+                },
             },
             "required": [
                 "issue_id", "risk_level", "recommended_action",
@@ -108,6 +143,9 @@ def get_structured_output_schema() -> dict:
                         "items": {"type": "string"},
                     },
                     "needs_human_review": {"type": "boolean"},
+                    "usage_context": {"type": "string"},
+                    "evidence_strength": {"type": "string"},
+                    "fix_plan": {"type": ["object", "null"]},
                 },
                 "required": [
                     "issue_id", "risk_level", "recommended_action",

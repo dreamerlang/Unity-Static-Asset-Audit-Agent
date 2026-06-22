@@ -112,6 +112,24 @@ Call submit_assessment when ready. Do not output text responses — always use t
 """
 
 
+STRUCTURED_ASSESSMENT_GUIDANCE = """
+
+## Structured Context and Fix Plan
+- Set `usage_context` to the best supported category from the submit_assessment schema.
+- Set `evidence_strength` to direct, possible, or none. It must reflect tool evidence,
+  not confidence alone.
+- When a concrete remediation is appropriate, include a `fix_plan` with:
+  `fix_type`, `target_asset`, structured `changes`, `verification_steps`, and
+  `requires_approval=true`.
+- Use `fix_type=no_change` with empty changes when the issue should not be fixed.
+- Never invent importer fields or asset paths. Omit `fix_plan` when evidence is
+  insufficient for a concrete plan.
+- Historical project feedback, when present in issue detail, is advisory context.
+  Prefer feedback matching the same rule and path, but never let it override direct
+  code evidence or deterministic guardrails.
+"""
+
+
 def build_system_prompt(
     issue_context: str,
     tool_descriptions: str,
@@ -140,6 +158,8 @@ def build_system_prompt(
         specialized = get_prompt_for_rule(rule_id)
         if specialized is not None:
             prompt = specialized
+
+    prompt += STRUCTURED_ASSESSMENT_GUIDANCE
 
     return prompt.format(
         step=step,
