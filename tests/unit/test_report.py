@@ -9,6 +9,7 @@ from unity_audit.report import (
     generate_json_reports,
     generate_markdown_report,
 )
+from unity_audit.evidence import EvidenceResult
 from unity_audit.rules.engine import Issue
 from unity_audit.scanner import AssetInfo
 
@@ -323,6 +324,48 @@ class TestHtmlReport:
         assert "贴图需要人工确认是否关闭读写权限" in content
         assert "建议关闭Read/Write以减少内存占用" in content
         assert "警告：缺少 .meta 文件" in content
+
+    def test_html_shows_final_human_review_instead_of_evidence_confirm(self, tmp_path):
+        """Detail rows should show final action review, not raw evidence flags."""
+        issue = _make_issue(
+            issue_id="TEX_RW_1",
+            rule_id="TEX_READ_WRITE_ENABLED",
+            severity="high",
+            asset_path="ReferenceImages/Linear/LinuxEditor/OpenGLCore/None/sample.png",
+        )
+        decision = _make_decision(
+            issue_id="TEX_RW_1",
+            rule_id="TEX_READ_WRITE_ENABLED",
+            asset_path=issue.asset_path,
+            severity="high",
+            action="do_not_fix",
+            risk_level="low",
+            reason="Reference image snapshot; keep Read/Write unchanged.",
+        )
+        evidence = EvidenceResult(
+            issue_id="TEX_RW_1",
+            context_summary="No pixel read/write API usage found.",
+            risk_hint="未发现像素读写 API 与此资源有明确关联",
+            need_manual_confirm=True,
+            association_level="none",
+        )
+
+        path = generate_html_report(
+            output_dir=str(tmp_path),
+            project_root="/fake/project",
+            platform="Android",
+            assets=[_make_asset(issue.asset_path)],
+            issues=[issue],
+            fix_decisions=[decision],
+            evidence_map={"TEX_RW_1": evidence},
+            warnings=[],
+            llm_used=True,
+        )
+
+        content = open(path).read()
+        assert "<dt>Needs Human Review</dt><dd>False</dd>" in content
+        assert "<dt>Evidence Needs Confirm</dt><dd>True</dd>" in content
+        assert "<dt>Needs Confirm</dt><dd>True</dd>" not in content
 
     def test_html_contains_action_badges(self, tmp_path):
         """HTML should have CSS classes for action and severity badges."""

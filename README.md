@@ -50,6 +50,47 @@ Additional outputs:
 
 Without an API key, agent mode falls back to deterministic results automatically.
 
+### Prepare Approved Auto-Fix Package
+
+Agent fix plans do not directly modify Unity assets. For reviewed TextureImporter
+auto-fix candidates, generate a deterministic Unity Editor package after
+reviewing `agent_fix_plans.json`:
+
+```bash
+python -m unity_audit.cli prepare-fixes /path/to/UnityProject \
+  --input ./outputs/agent_fix_plans.json \
+  --output ./outputs/auto_fix_package
+```
+
+This dry-run package contains:
+- `unity_audit_texture_importer_fix_manifest.json` — reviewed candidate operations
+- `UnityAuditTextureImporterAutoFixer.cs` — Unity Editor script that applies
+  supported TextureImporter setting changes
+
+After review, write the approved package under the Unity project:
+
+```bash
+python -m unity_audit.cli prepare-fixes /path/to/UnityProject \
+  --input ./outputs/agent_fix_plans.json \
+  --approve
+```
+
+Then open Unity and run:
+
+```text
+Tools > Unity Audit > Apply Approved Texture Importer Fixes
+```
+
+The Agent decides whether a fix is a candidate and emits a `fix_plan`; the
+generated Unity Editor script performs the actual importer change. Currently
+supported changes are:
+- `isReadable: false` for Texture Read/Write
+- `mipmapEnabled: false` for UI texture mipmaps
+- `maxTextureSize: <positive integer>` for UI texture max size
+
+Plans that are not `auto_fix_candidate`, are missing `requires_approval: true`,
+or attempt unsupported fields are rejected from the package.
+
 ### Record Human Feedback
 
 Store a reviewed decision in the Unity project so future Agent runs can use it
@@ -128,6 +169,18 @@ Options:
   --no-trace           Disable trace.jsonl output
 ```
 
+```
+prepare-fixes <project> --input agent_fix_plans.json [--output DIR] [--approve]
+
+Positional:
+  project              Path to Unity project root
+
+Options:
+  --input FILE         Agent fix plan JSON from a previous scan
+  --output DIR         Dry-run package directory (default: ./auto_fix_package)
+  --approve            Write the Unity Editor package under Assets/Editor
+```
+
 Exit codes:
 - `0` — scan completed (including agent fallback)
 - `1` — project path, config, or scan error
@@ -159,8 +212,9 @@ Key principles:
   evidence, then produces structured assessments.
 - **Always completes** — if the agent/LLM fails, the system falls back to
   deterministic fix planner results.
-- **Secure by default** — all tool paths are sandboxed, no shell execution,
-  no write tools in this version.
+- **Secure by default** — Agent tools are read-only. Auto-fix is a separate
+  approval-gated package generator that only emits deterministic Unity Editor
+  scripts for reviewed fix plans.
 
 ## Project Structure
 
@@ -178,6 +232,7 @@ unity_audit/
   meta_parser.py       # Unity .meta file parser
   report.py            # JSON + Markdown report generator
   scanner.py           # Project scanner
+  harness/auto_fix.py  # Approval-gated Unity Editor fix package generation
 
 tests/
   unit/                # Unit tests (140+ tests)

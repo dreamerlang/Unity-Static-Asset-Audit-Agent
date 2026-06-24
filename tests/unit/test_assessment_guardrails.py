@@ -22,6 +22,15 @@ def _decision(action: str = "manual_confirm_required") -> FixDecision:
     )
 
 
+def _decision_for_path(
+    asset_path: str,
+    action: str = "manual_confirm_required",
+) -> FixDecision:
+    decision = _decision(action=action)
+    decision.asset_path = asset_path
+    return decision
+
+
 def _assessment(
     action: str = "auto_fix_candidate",
     confidence: float = 0.9,
@@ -71,6 +80,34 @@ def test_reconcile_accepts_high_confidence_agent_assessment():
     assert result.action == "auto_fix_candidate"
     assert result.risk_level == "low"
     assert result.reason == "Agent believes this can be fixed."
+
+
+def test_reconcile_explains_reference_images_base_manual_boundary():
+    """ReferenceImagesBase Read/Write decisions should explain manual review."""
+    result = reconcile_agent_assessment_with_decision(
+        _decision_for_path("ReferenceImagesBase/005_LitBakedEmission.png"),
+        _assessment(action="manual_confirm_required", confidence=0.65),
+    )
+
+    assert result.action == "manual_confirm_required"
+    assert "ReferenceImagesBase" in result.reason
+    assert "human review" in result.reason
+    assert "direct code evidence" in result.reason
+
+
+def test_reconcile_explains_reference_images_no_fix_boundary():
+    """ReferenceImages platform snapshots should explain do_not_fix."""
+    result = reconcile_agent_assessment_with_decision(
+        _decision_for_path(
+            "ReferenceImages/Linear/LinuxEditor/OpenGLCore/None/sample.png"
+        ),
+        _assessment(action="do_not_fix", confidence=0.85),
+    )
+
+    assert result.action == "do_not_fix"
+    assert "ReferenceImages/" in result.reason
+    assert "platform-specific comparison snapshot" in result.reason
+    assert "keep Read/Write unchanged" in result.reason
 
 
 def test_guardrail_rejects_fix_plan_for_wrong_asset():

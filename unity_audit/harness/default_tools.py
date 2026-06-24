@@ -972,6 +972,11 @@ def build_default_tools(audit_result: AuditResult) -> list[ToolDef]:
                 "Provide risk_level (low/medium/high), recommended_action "
                 "(auto_fix_candidate/manual_confirm_required/do_not_fix), "
                 "confidence (0.0-1.0), and a brief summary explaining your reasoning. "
+                "For TEX_READ_WRITE_ENABLED auto_fix_candidate, include fix_plan "
+                "with fix_type=importer_setting and changes={\"isReadable\": false}; "
+                "For TEX_UI_MIPMAP_ENABLED use changes={\"mipmapEnabled\": false}; "
+                "for TEX_UI_MAX_SIZE_TOO_LARGE use a positive maxTextureSize. "
+                "requires_approval must be true. "
                 "Call this tool as soon as you have enough information — do not keep "
                 "calling other tools after you have made your assessment."
             ),

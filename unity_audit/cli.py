@@ -1,6 +1,7 @@
 """CLI entry point for the Unity Static Asset Audit Agent."""
 
 import argparse
+import json
 import os
 import sys
 
@@ -589,6 +590,65 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prepare_fixes(args: argparse.Namespace) -> int:
+    """Prepare approval-gated Unity Editor auto-fix package."""
+    from unity_audit.harness.auto_fix import (
+        AutoFixPackageError,
+        approved_project_package_dir,
+        collect_texture_importer_fix_candidates,
+        write_texture_importer_fix_package,
+    )
+
+    project_root = os.path.abspath(args.project)
+    if not os.path.isdir(project_root):
+        print(f"Project directory not found: {project_root}", file=sys.stderr)
+        return 1
+
+    input_path = os.path.abspath(args.input)
+    try:
+        with open(input_path, encoding="utf-8") as f:
+            records = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"Failed to read fix plans: {e}", file=sys.stderr)
+        return 2
+
+    if not isinstance(records, list):
+        print("Fix plan input must be a JSON array", file=sys.stderr)
+        return 2
+
+    candidates, rejected = collect_texture_importer_fix_candidates(records)
+    output_dir = (
+        approved_project_package_dir(project_root)
+        if args.approve
+        else os.path.abspath(args.output or os.path.join(os.getcwd(), "auto_fix_package"))
+    )
+
+    try:
+        package = write_texture_importer_fix_package(
+            candidates,
+            output_dir=output_dir,
+            approved=args.approve,
+            rejected=rejected,
+        )
+    except (AutoFixPackageError, OSError) as e:
+        print(f"Failed to prepare fixes: {e}", file=sys.stderr)
+        return 2
+
+    print(f"Prepared {package.candidate_count} TextureImporter fix candidate(s).")
+    print(f"Manifest: {package.manifest_path}")
+    print(f"Unity script: {package.script_path}")
+    if package.rejected:
+        print(f"Rejected {len(package.rejected)} non-eligible fix plan(s).")
+    if package.approved:
+        print(
+            "Approved package written under Assets/Editor. In Unity, run "
+            "Tools > Unity Audit > Apply Approved Texture Importer Fixes."
+        )
+    else:
+        print("Dry-run package generated. Review it, then rerun with --approve.")
+    return 0
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -600,6 +660,7 @@ def main():
     # scan command (kept for backward compatibility)
     _build_scan_parser(subparsers)
     _build_feedback_parser(subparsers)
+    _build_prepare_fixes_parser(subparsers)
 
     args = parser.parse_args()
 
@@ -607,6 +668,8 @@ def main():
         return cmd_scan(args)
     elif args.command == "feedback":
         return cmd_feedback(args)
+    elif args.command == "prepare-fixes":
+        return cmd_prepare_fixes(args)
     elif args.command is None:
         parser.print_help()
         return 0
@@ -717,6 +780,34 @@ def _build_feedback_parser(subparsers):
         choices=["accepted_fix", "rejected_fix", "false_positive", "manual_exception"],
     )
     feedback_parser.add_argument("--reason", required=True, help="Human review rationale")
+
+
+def _build_prepare_fixes_parser(subparsers):
+    """Build the approval-gated auto-fix package subparser."""
+    prepare_parser = subparsers.add_parser(
+        "prepare-fixes",
+        help="Prepare a Unity Editor package for approved auto-fix candidates",
+    )
+    prepare_parser.add_argument("project", help="Path to the Unity project root")
+    prepare_parser.add_argument(
+        "--input",
+        required=True,
+        help="Path to agent_fix_plans.json from an Agent scan",
+    )
+    prepare_parser.add_argument(
+        "--output",
+        default=None,
+        help="Dry-run package output directory (default: ./auto_fix_package)",
+    )
+    prepare_parser.add_argument(
+        "--approve",
+        action="store_true",
+        default=False,
+        help=(
+            "Write the package under Assets/Editor/UnityAuditAutoFix so Unity "
+            "can apply it via the generated menu item"
+        ),
+    )
 
 
 if __name__ == "__main__":

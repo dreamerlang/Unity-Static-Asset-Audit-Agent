@@ -18,6 +18,11 @@ def _add_schema_version(data: dict) -> dict:
     return {"schema_version": SCHEMA_VERSION, **data}
 
 
+def _decision_needs_human_review(action: str) -> bool:
+    """Return whether the final recommendation should be reviewed by a human."""
+    return action == "manual_confirm_required"
+
+
 def generate_json_reports(
     output_dir: str,
     assets: list[AssetInfo],
@@ -75,6 +80,7 @@ def generate_json_reports(
             "severity": d.severity,
             "action": d.action,
             "risk_level": d.risk_level,
+            "needs_human_review": _decision_needs_human_review(d.action),
             "reason": d.reason,
             "suggestion": d.suggestion,
         }
@@ -458,7 +464,7 @@ _HTML_CSS = r"""
     .detail-content{font-size:.82rem}
     .detail-content dl{display:grid;grid-template-columns:120px 1fr;gap:4px 12px}
     .detail-content dt{font-weight:600;color:var(--text-secondary)}
-    .detail-content dd{margin:0}
+    .detail-content dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
     .detail-content pre{background:#e9ecef;padding:8px 12px;border-radius:4px;font-size:.78rem;overflow-x:auto;margin-top:4px;max-height:200px;overflow-y:auto}
     .code-ref{margin-top:8px}
     .code-ref summary{font-weight:600;cursor:pointer;color:var(--accent)}
@@ -588,6 +594,7 @@ def generate_html_report(
             "severity": d.severity,
             "action": d.action,
             "risk_level": d.risk_level,
+            "needs_human_review": _decision_needs_human_review(d.action),
             "reason": d.reason,
             "suggestion": d.suggestion,
         }
@@ -814,6 +821,8 @@ def generate_html_report(
             parts.append(f"<dt>Suggestion</dt><dd>{_esc(issue.suggestion)}</dd>")
             if dec:
                 parts.append(f"<dt>Decision Reason</dt><dd>{_esc(reason) if reason else '—'}</dd>")
+                needs_review = _decision_needs_human_review(action)
+                parts.append(f"<dt>Needs Human Review</dt><dd>{needs_review}</dd>")
             if issue.evidence:
                 evidence_str = _json.dumps(issue.evidence, ensure_ascii=False, indent=2)
                 parts.append(f"<dt>Evidence</dt><dd><pre>{_esc(evidence_str)}</pre></dd>")
@@ -821,7 +830,7 @@ def generate_html_report(
                 parts.append(f"<dt>Context</dt><dd>{_esc(ev.context_summary)}</dd>")
                 if ev.risk_hint:
                     parts.append(f"<dt>Risk Hint</dt><dd>{_esc(ev.risk_hint)}</dd>")
-                parts.append(f"<dt>Needs Confirm</dt><dd>{ev.need_manual_confirm}</dd>")
+                parts.append(f"<dt>Evidence Needs Confirm</dt><dd>{ev.need_manual_confirm}</dd>")
                 if ev.code_evidence:
                     parts.append('<dt>Code Refs</dt><dd>')
                     parts.append('<details class="code-ref"><summary>Code References</summary><ul>')

@@ -95,6 +95,13 @@ When choosing your recommended_action:
   If you find evidence that contradicts it, explain why in your summary.
 - **For ReferenceImages/ assets:** NPOT and Read/Write issues are usually intentional.
   Recommend do_not_fix with appropriate confidence unless code evidence says otherwise.
+- For TEX_READ_WRITE_ENABLED auto_fix_candidate, include a fix_plan with
+  fix_type="importer_setting", changes={{"isReadable": false}},
+  target_asset equal to the current asset_path, verification_steps, and
+  requires_approval=true. Do not propose direct .meta edits.
+- For TEX_UI_MIPMAP_ENABLED auto_fix_candidate, use
+  changes={{"mipmapEnabled": false}}. For TEX_UI_MAX_SIZE_TOO_LARGE
+  auto_fix_candidate, use changes={{"maxTextureSize": <positive integer>}}.
 
 ## Current Issue
 {issue_context}

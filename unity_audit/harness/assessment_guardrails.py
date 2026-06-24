@@ -87,6 +87,41 @@ def retarget_fix_plan(fix_plan: dict | None, target_asset: str) -> dict | None:
     }
 
 
+def _with_decision_boundary_note(
+    decision: FixDecision,
+    action: str,
+    reason: str,
+) -> str:
+    """Add path-specific rationale when similar evidence leads to different actions."""
+    if decision.rule_id != "TEX_READ_WRITE_ENABLED":
+        return reason
+
+    asset_path = decision.asset_path
+    note = ""
+    if (
+        action == "manual_confirm_required"
+        and asset_path.startswith("ReferenceImagesBase/")
+    ):
+        note = (
+            "Decision boundary: ReferenceImagesBase assets look like baseline "
+            "source images, but without direct code evidence they still require "
+            "human review before changing Read/Write."
+        )
+    elif (
+        action == "do_not_fix"
+        and asset_path.startswith("ReferenceImages/")
+    ):
+        note = (
+            "Decision boundary: ReferenceImages/ platform-specific comparison "
+            "snapshot paths are treated as expected test data; keep Read/Write "
+            "unchanged unless a human confirms the asset is not used by tests."
+        )
+
+    if not note or note in reason:
+        return reason
+    return f"{reason} {note}"
+
+
 def reconcile_agent_assessment_with_decision(
     decision: FixDecision,
     assessment: AgentAssessment,
@@ -139,6 +174,8 @@ def reconcile_agent_assessment_with_decision(
         severity=decision.severity,
         action=assessment.recommended_action,
         risk_level=assessment.risk_level,
-        reason=assessment.summary,
+        reason=_with_decision_boundary_note(
+            decision, assessment.recommended_action, assessment.summary
+        ),
         suggestion=decision.suggestion,
     )

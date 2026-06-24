@@ -211,7 +211,7 @@ class HarnessRunner:
                             peer_asset = peer_data["asset_path"] if peer_data else peer_id
                             peer_summary = (
                                 f"[同组评估，基于 {representative_id} 的分析] "
-                                f"{peer_asset}: {assessment.summary[:180]}"
+                                f"{peer_asset}: {assessment.summary}"
                             )
                             peer_assessment = AgentAssessment(
                                 issue_id=peer_id,

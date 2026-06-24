@@ -668,6 +668,12 @@ class TestGroupCoordinator:
         issue_rep = _make_issue("TEX_RW_0", "TEX_READ_WRITE_ENABLED", "high", "Textures/a.png")
         # Peer issues (same group, different asset paths)
         audit_result = _make_audit_result([issue_rep])
+        full_reason_marker = "FULL_REASON_END_MARKER"
+        long_summary = (
+            "Reference image analysis. "
+            + "Detailed evidence sentence. " * 12
+            + full_reason_marker
+        )
 
         def agent_factory():
             return _make_fake_agent([{
@@ -677,7 +683,7 @@ class TestGroupCoordinator:
                     "risk_level": "low",
                     "recommended_action": "do_not_fix",
                     "confidence": 0.9,
-                    "summary": "Reference image, safe to ignore.",
+                    "summary": long_summary,
                     "evidence_refs": [],
                     "needs_human_review": False,
                 },
@@ -721,6 +727,7 @@ class TestGroupCoordinator:
         assert len(peer_assessments) == 2
         for pa in peer_assessments:
             assert "同组评估" in pa.summary
+            assert full_reason_marker in pa.summary
             assert pa.recommended_action == "do_not_fix"
             assert pa.risk_level == "low"
 
@@ -807,6 +814,24 @@ class TestPromptRouting:
         assert "decompress" in AUDIO_AGENT_PROMPT.lower()
         assert "missing script" in PREFAB_AGENT_PROMPT.lower()
         assert "variant" in SHADER_AGENT_PROMPT.lower()
+
+    def test_texture_prompt_requires_read_write_fix_plan(self):
+        """Texture prompt should require structured Read/Write fix plans."""
+        assert 'changes={{"isReadable": false}}' in TEXTURE_AGENT_PROMPT
+        assert 'changes={{"mipmapEnabled": false}}' in TEXTURE_AGENT_PROMPT
+        assert 'changes={{"maxTextureSize": <positive integer>}}' in TEXTURE_AGENT_PROMPT
+        assert "requires_approval=true" in TEXTURE_AGENT_PROMPT
+        assert "Do not propose direct .meta edits" in TEXTURE_AGENT_PROMPT
+        prompt = build_system_prompt(
+            issue_context='{"rule_id":"TEX_READ_WRITE_ENABLED"}',
+            tool_descriptions="Tools here",
+            tool_results_context="No results",
+            step=1,
+            max_steps=12,
+            rule_id="TEX_READ_WRITE_ENABLED",
+        )
+        assert 'changes={"isReadable": false}' in prompt
+        assert 'changes={"mipmapEnabled": false}' in prompt
 
     def test_audit_agent_uses_specialized_prompt(self):
         """AuditAgent.get_action() should pass rule_id and trigger specialized prompt."""
@@ -1029,6 +1054,59 @@ class TestHarnessRunnerParallel:
         # 2 groups (reference_images + ui) → 2 agent calls → 3 total assessments
         # (1 rep + 1 peer for reference_images, 1 rep for ui)
         assert len(final_state.agent_assessments) == 3
+
+    def test_runner_sequential_peer_broadcast_keeps_full_summary(self):
+        """Sequential peer broadcast should not truncate Decision Reason text."""
+        issue_a = _make_issue("TEX_RW_0", "TEX_READ_WRITE_ENABLED", "high",
+                              "ReferenceImages/Linear/a.png")
+        issue_b = _make_issue("TEX_RW_1", "TEX_READ_WRITE_ENABLED", "high",
+                              "ReferenceImages/Linear/b.png")
+        audit_result = _make_audit_result([issue_a, issue_b])
+        full_reason_marker = "FULL_REASON_END_MARKER"
+        long_summary = (
+            "Reference image analysis. "
+            + "Detailed evidence sentence. " * 12
+            + full_reason_marker
+        )
+
+        agent = _make_fake_agent([{
+            "action": "finish",
+            "assessment": {
+                "issue_id": "TEX_RW_0",
+                "risk_level": "low",
+                "recommended_action": "do_not_fix",
+                "confidence": 0.85,
+                "summary": long_summary,
+                "evidence_refs": [],
+                "needs_human_review": False,
+            },
+        }])
+
+        runner = HarnessRunner(
+            agent=agent,
+            audit_result=audit_result,
+            max_steps=12,
+            trace_enabled=False,
+            max_workers=1,
+            agent_factory=None,
+        )
+
+        state = RunState(
+            run_id="sequential_peer_summary",
+            project_root="/fake",
+            platform="Android",
+            pending_issue_ids=["TEX_RW_0", "TEX_RW_1"],
+            max_steps=12,
+        )
+
+        final_state = runner.run(state, audit_result)
+        peer = next(
+            a for a in final_state.agent_assessments
+            if a.issue_id == "TEX_RW_1"
+        )
+
+        assert "同组评估" in peer.summary
+        assert full_reason_marker in peer.summary
 
 
 # ═══════════════════════════════════════════════════════════════════

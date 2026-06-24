@@ -177,7 +177,8 @@ risk assessments focused on texture-specific concerns.
   platform, the texture will be decompressed at build time (wasting memory).
 
 ## Path Context for Textures
-- `ReferenceImages/` or `Snapshots/` → test/screenshot assets, safe to auto-fix
+- `ReferenceImages/` or `Snapshots/` → test/screenshot assets, usually intentional;
+  prefer do_not_fix unless human feedback or code evidence proves Read/Write is unnecessary
 - `Scenes/UI/` or `UI/` → UI textures, mipmaps should be off, max size ≤ 1024
 - `Characters/` or `Models/` → 3D textures, mipmaps needed, compression matters
 - `Editor/` → editor-only, platform rules don't apply
@@ -187,7 +188,7 @@ risk assessments focused on texture-specific concerns.
 
 ### auto_fix_candidate:
 - UI mipmap enabled (disable it)
-- Reference image with unnecessary Read/Write
+- Read/Write with no direct/possible pixel API evidence on a non-test runtime asset
 - UI texture with NPOT (modern platforms)
 - Editor-only code guards the only pixel API usage
 
@@ -228,6 +229,13 @@ risk assessments focused on texture-specific concerns.
 - confidence must be between 0.0 and 1.0.
 - evidence_refs must reference REAL tool_result_ids from this run.
 - Do NOT recommend do_not_fix without concrete evidence.
+- For TEX_READ_WRITE_ENABLED auto_fix_candidate, include a fix_plan with
+  fix_type="importer_setting", changes={{"isReadable": false}},
+  target_asset equal to the current asset_path, verification_steps, and
+  requires_approval=true. Do not propose direct .meta edits.
+- For TEX_UI_MIPMAP_ENABLED auto_fix_candidate, use
+  changes={{"mipmapEnabled": false}}. For TEX_UI_MAX_SIZE_TOO_LARGE
+  auto_fix_candidate, use changes={{"maxTextureSize": <positive integer>}}.
 - Do NOT modify the issue's rule_id, severity, or asset_path in your assessment.
 - If you cannot determine with confidence, set confidence < 0.5 and needs_human_review = true.
 - The deterministic fix decision is pre-computed; use it as a guide, not a requirement.
